@@ -15,3 +15,5 @@
 - `13_wall_x_vla_runtime_precision_policy.md`: implementation-oriented article focused on how to design precision policy in a VLA runtime
 - `14_wall_x_mlp_moe_fused_compute_pseudocode.md`: implementation-oriented article focused on the minimum pseudocode of a Wall-X MLP MoE fused compute kernel
 - `15_wall_x_vla_runtime_planner_benchmark_loop.md`: implementation-oriented article focused on how planner and benchmark should form a closed loop in a VLA runtime
+- `16_wall_x_mlp_moe_low_precision_landing.md`: implementation-oriented article focused on where low-precision should land first in a Wall-X MLP MoE path
+- `17_wall_x_vla_runtime_edge_cloud_strategy.md`: implementation-oriented article focused on the minimum edge/cloud differentiation strategy of a VLA runtime
