@@ -9,10 +9,16 @@ from wall_x.fusions import ops
 from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl import (
     apply_multimodal_rotary_pos_emb,
 )
-from flash_attn import flash_attn_func
-from transformers.modeling_flash_attention_utils import (
-    is_flash_attn_greater_or_equal_2_10,
-)
+try:
+    from flash_attn import flash_attn_func
+    from transformers.modeling_flash_attention_utils import (
+        is_flash_attn_greater_or_equal_2_10,
+    )
+except ImportError:
+    flash_attn_func = None
+
+    def is_flash_attn_greater_or_equal_2_10():
+        return False
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VLRotaryEmbedding,
     repeat_kv,
@@ -525,6 +531,11 @@ class JointQwen2VLAttention(nn.Module):
 class JointQwen2VLFlashAttention(JointQwen2VLAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if flash_attn_func is None:
+            raise ImportError(
+                "flash-attn is required when attn_implementation='flash_attention_2'. "
+                "Use sdpa/eager attention or install flash-attn."
+            )
 
         # TODO: Should be removed once Flash Attention for RoCm is bumped to 2.1.
         # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.

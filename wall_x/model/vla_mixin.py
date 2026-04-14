@@ -13,7 +13,12 @@ from packaging import version
 
 from transformers import GenerationMixin
 from transformers.activations import ACT2FN
-from transformers.modeling_utils import AttentionInterface
+try:
+    from transformers.modeling_utils import AttentionInterface
+except ImportError:
+    class AttentionInterface:
+        def valid_keys(self):
+            return []
 
 from transformers.utils import logging, is_torch_xla_available
 

@@ -325,6 +325,15 @@ class DataCollator:
         x = torch.clamp(x, -1, 1)
         return x
 
+    @staticmethod
+    def _pad_last_dim_to_target(x: torch.Tensor, target_dim: int) -> torch.Tensor:
+        if x.shape[-1] >= target_dim:
+            return x
+        pad_shape = list(x.shape)
+        pad_shape[-1] = target_dim - x.shape[-1]
+        padding = torch.zeros(*pad_shape, dtype=x.dtype, device=x.device)
+        return torch.cat([x, padding], dim=-1)
+
     def __call__(self, batch):
         additional_inputs = {}
 
@@ -336,30 +345,11 @@ class DataCollator:
                 agent_pos_mask = (~torch.isnan(agent_pos)).float()
                 # print("agent_pos_mask",agent_pos_mask.shape)
                 agent_pos.nan_to_num_(nan=0.0)
-
-                # if agent_pos.shape[-1] != 20:
-                #     agent_pos = torch.cat(
-                #         [
-                #             agent_pos,
-                #             torch.zeros(
-                #                 agent_pos.shape[0],
-                #                 agent_pos.shape[1],
-                #                 20 - agent_pos.shape[-1],
-                #             ),
-                #         ],
-                #         dim=-1,
-                #     )
-                #     agent_pos_mask = torch.cat(
-                #         [
-                #             agent_pos_mask,
-                #             torch.zeros(
-                #                 agent_pos_mask.shape[0],
-                #                 agent_pos_mask.shape[1],
-                #                 20 - agent_pos_mask.shape[-1],
-                #             ),
-                #         ],
-                #         dim=-1,
-                #     )
+                target_dim = sum(self.config["agent_pos_config"].values())
+                agent_pos = self._pad_last_dim_to_target(agent_pos, target_dim)
+                agent_pos_mask = self._pad_last_dim_to_target(
+                    agent_pos_mask, target_dim
+                )
                 agent_pos = self.normalizer_propri.normalize_data(
                     agent_pos, self.dataset_name
                 )
@@ -371,28 +361,9 @@ class DataCollator:
                     action = action.unsqueeze(1)
                 dof_mask = (~torch.isnan(action)).float()
                 action.nan_to_num_(nan=0.0)
-
-                # if action.shape[-1] != 20:
-                #     action = torch.cat(
-                #         [
-                #             action,
-                #             torch.zeros(
-                #                 action.shape[0], action.shape[1], 20 - action.shape[-1]
-                #             ),
-                #         ],
-                #         dim=-1,
-                #     )
-                #     dof_mask = torch.cat(
-                #         [
-                #             dof_mask,
-                #             torch.zeros(
-                #                 dof_mask.shape[0],
-                #                 dof_mask.shape[1],
-                #                 20 - dof_mask.shape[-1],
-                #             ),
-                #         ],
-                #         dim=-1,
-                #     )
+                target_dim = sum(self.config["dof_config"].values())
+                action = self._pad_last_dim_to_target(action, target_dim)
+                dof_mask = self._pad_last_dim_to_target(dof_mask, target_dim)
                 action = self.normalizer_action.normalize_data(
                     action, self.dataset_name
                 )
@@ -496,11 +467,22 @@ def load_lerobot_data(
         ],
     }
     batch_size = config.get("batch_size_per_gpu", 8)
-    episodes = np.arange(episodes_num).tolist()
+    selected_episodes = lerobot_config.get("episodes", None)
+    if selected_episodes is not None:
+        episodes = list(selected_episodes)
+    else:
+        episodes = np.arange(episodes_num).tolist()
 
     train_test_split = dataload_config.get("train_test_split", 0.95)
     train_episodes = episodes[: int(episodes_num * train_test_split)]
     test_episodes = episodes[int(episodes_num * train_test_split) :]
+
+    if selected_episodes is not None:
+        split_index = max(1, int(len(episodes) * train_test_split))
+        if split_index >= len(episodes) and len(episodes) > 1:
+            split_index = len(episodes) - 1
+        train_episodes = episodes[:split_index]
+        test_episodes = episodes[split_index:]
 
     train_dataset = LeRobotDataset(
         repo_id,
