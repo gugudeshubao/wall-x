@@ -17,3 +17,5 @@
 - `15_wall_x_vla_runtime_planner_benchmark_loop.md`: implementation-oriented article focused on how planner and benchmark should form a closed loop in a VLA runtime
 - `16_wall_x_mlp_moe_low_precision_landing.md`: implementation-oriented article focused on where low-precision should land first in a Wall-X MLP MoE path
 - `17_wall_x_vla_runtime_edge_cloud_strategy.md`: implementation-oriented article focused on the minimum edge/cloud differentiation strategy of a VLA runtime
+- `18_wall_x_mlp_moe_packed_weight_layout.md`: implementation-oriented article focused on how packed weights should be organized for a Wall-X MLP MoE path
+- `19_wall_x_vla_runtime_fallback_design.md`: implementation-oriented article focused on how fallback should be designed in a VLA runtime
