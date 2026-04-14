@@ -11,3 +11,5 @@
 - `09_wall_x_first_fused_path_mlp_moe.md`: practical article focused on why the first fused path may be better placed on MLP MoE than attention
 - `10_wall_x_mlp_moe_fused_kernel_interface.md`: implementation-oriented article focused on how to split interfaces for a Wall-X MLP MoE fused kernel
 - `11_wall_x_vla_runtime_planner.md`: implementation-oriented article focused on how a VLA runtime planner should choose cloud/edge, precision and fused paths
+- `12_wall_x_mlp_moe_fused_path_dataflow.md`: implementation-oriented article focused on the dataflow sketch of a Wall-X MLP MoE fused path
+- `13_wall_x_vla_runtime_precision_policy.md`: implementation-oriented article focused on how to design precision policy in a VLA runtime
