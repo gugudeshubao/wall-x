@@ -84,6 +84,9 @@ bash ./workspace/lerobot_example/run.sh
 
 ## Inference
 
+For the AutoDL-specific setup and the one-command runner scripts, see `AUTODL_SETUP.md`.
+For the later training-only extras such as `flash-attn`, see `scripts/install_training_extras.sh`.
+
 ### Basic Action Inference
 
 For model inference, please refer to:
