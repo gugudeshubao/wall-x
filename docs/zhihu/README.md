@@ -13,3 +13,5 @@
 - `11_wall_x_vla_runtime_planner.md`: implementation-oriented article focused on how a VLA runtime planner should choose cloud/edge, precision and fused paths
 - `12_wall_x_mlp_moe_fused_path_dataflow.md`: implementation-oriented article focused on the dataflow sketch of a Wall-X MLP MoE fused path
 - `13_wall_x_vla_runtime_precision_policy.md`: implementation-oriented article focused on how to design precision policy in a VLA runtime
+- `14_wall_x_mlp_moe_fused_compute_pseudocode.md`: implementation-oriented article focused on the minimum pseudocode of a Wall-X MLP MoE fused compute kernel
+- `15_wall_x_vla_runtime_planner_benchmark_loop.md`: implementation-oriented article focused on how planner and benchmark should form a closed loop in a VLA runtime
