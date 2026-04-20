@@ -25,3 +25,5 @@
 - `23_wall_x_vla_runtime_capability_matrix.md`: implementation-oriented article focused on how capability matrix should be expressed in a VLA runtime
 - `24_wall_x_mlp_moe_scatter_output_fusion.md`: implementation-oriented article focused on when the scatter/output path of Wall-X MLP MoE is worth further fusion
 - `25_wall_x_vla_runtime_graph_capture_megakernel_timing.md`: implementation-oriented article focused on when graph capture and local megakernel should be introduced in a VLA runtime
+- `26_wall_x_mlp_moe_local_megakernel_boundary.md`: implementation-oriented article focused on how to judge the boundary from local fused path to local megakernel in Wall-X MLP MoE
+- `27_wall_x_vla_runtime_path_taxonomy.md`: implementation-oriented article focused on how path taxonomy should be defined in a VLA runtime
