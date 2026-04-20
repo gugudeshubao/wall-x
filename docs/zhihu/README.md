@@ -27,3 +27,5 @@
 - `25_wall_x_vla_runtime_graph_capture_megakernel_timing.md`: implementation-oriented article focused on when graph capture and local megakernel should be introduced in a VLA runtime
 - `26_wall_x_mlp_moe_local_megakernel_boundary.md`: implementation-oriented article focused on how to judge the boundary from local fused path to local megakernel in Wall-X MLP MoE
 - `27_wall_x_vla_runtime_path_taxonomy.md`: implementation-oriented article focused on how path taxonomy should be defined in a VLA runtime
+- `28_wall_x_mlp_moe_down_scatter_joint_optimization.md`: implementation-oriented article focused on when down+scatter is worth treating as a joint optimization target in Wall-X MLP MoE
+- `29_wall_x_vla_runtime_execution_report_design.md`: implementation-oriented article focused on how ExecutionReport should be designed in a VLA runtime
