@@ -21,3 +21,5 @@
 - `19_wall_x_vla_runtime_fallback_design.md`: implementation-oriented article focused on how fallback should be designed in a VLA runtime
 - `20_wall_x_mlp_moe_kernel_benchmark_split.md`: implementation-oriented article focused on how to split kernel benchmarks for a Wall-X MLP MoE path
 - `21_wall_x_vla_runtime_multi_model_abstractions.md`: implementation-oriented article focused on which abstractions must stabilize first when a VLA runtime grows from one model to many
+- `22_wall_x_mlp_moe_bf16_to_low_precision.md`: implementation-oriented article focused on the evolution path from BF16 fused to low-precision fused for Wall-X MLP MoE
+- `23_wall_x_vla_runtime_capability_matrix.md`: implementation-oriented article focused on how capability matrix should be expressed in a VLA runtime
