@@ -31,3 +31,5 @@
 - `29_wall_x_vla_runtime_execution_report_design.md`: implementation-oriented article focused on how ExecutionReport should be designed in a VLA runtime
 - `30_wall_x_mlp_moe_path_benchmark_timing.md`: implementation-oriented article focused on when Wall-X MLP MoE should move from kernel benchmarks to end-to-end path benchmarks
 - `31_wall_x_vla_runtime_plan_report_capability_alignment.md`: implementation-oriented article focused on how plan/report/capability should align in a VLA runtime
+- `32_wall_x_mlp_moe_edge_workload_priority.md`: implementation-oriented article focused on which stage of Wall-X MLP MoE should be optimized first under edge workloads
+- `33_wall_x_vla_runtime_object_ownership.md`: implementation-oriented article focused on who should own benchmark/report/capability in a VLA runtime
