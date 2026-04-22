@@ -35,3 +35,5 @@
 - `33_wall_x_vla_runtime_object_ownership.md`: implementation-oriented article focused on who should own benchmark/report/capability in a VLA runtime
 - `34_wall_x_mlp_moe_cloud_workload_priority.md`: implementation-oriented article focused on which stage of Wall-X MLP MoE should be optimized first under cloud workloads
 - `35_wall_x_vla_runtime_min_repo_layout.md`: implementation-oriented article focused on how to organize the minimum repo layout of a VLA runtime
+- `36_wall_x_mlp_moe_mixed_workload_priority.md`: implementation-oriented article focused on how to prioritize Wall-X MLP MoE optimization under mixed workloads
+- `37_wall_x_vla_runtime_core_freeze_vs_evolve.md`: implementation-oriented article focused on which runtime core objects should freeze first and which should keep evolving
