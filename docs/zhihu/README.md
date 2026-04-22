@@ -33,3 +33,5 @@
 - `31_wall_x_vla_runtime_plan_report_capability_alignment.md`: implementation-oriented article focused on how plan/report/capability should align in a VLA runtime
 - `32_wall_x_mlp_moe_edge_workload_priority.md`: implementation-oriented article focused on which stage of Wall-X MLP MoE should be optimized first under edge workloads
 - `33_wall_x_vla_runtime_object_ownership.md`: implementation-oriented article focused on who should own benchmark/report/capability in a VLA runtime
+- `34_wall_x_mlp_moe_cloud_workload_priority.md`: implementation-oriented article focused on which stage of Wall-X MLP MoE should be optimized first under cloud workloads
+- `35_wall_x_vla_runtime_min_repo_layout.md`: implementation-oriented article focused on how to organize the minimum repo layout of a VLA runtime
