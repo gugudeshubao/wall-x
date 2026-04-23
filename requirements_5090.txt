@@ -1,0 +1,14 @@
+# Requirements for RTX 5090 (Blackwell, SM 12.0)
+# PyTorch must be installed separately first:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+# flash-attn must be compiled from source:
+#   MAX_JOBS=2 SKIP_CUDA_MISMATCH_CHECK=1 pip install flash-attn --no-build-isolation
+
+transformers>=4.50,<5.0
+accelerate>=1.10.1
+peft>=0.19.1
+scipy>=1.15.3
+torchdiffeq>=0.2.5
+qwen_vl_utils>=0.0.11
+diffusers>=0.37.1
+wheel
