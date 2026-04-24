@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>WeChat Article</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 16px; color: #333; line-height: 1.8; padding: 0 10px;">
+<h1 style="font-size: 24px; font-weight: bold; color: #1a1a1a; text-align: center; margin: 30px 0 20px; padding-bottom: 10px; border-bottom: 2px solid #333;">别一上来就谈 CUDA：先看清 Wall-X 到底是什么模型</h1>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">很多人第一次看 Wall-X 代码，第一反应都是先找自定义 CUDA 算子。这个动作不算错，但如果一开始就把注意力全压在 kernel 上，你后面大概率会越看越乱。</blockquote>
+<section style="margin: 16px 0; padding: 16px; background: #fff8f0; border: 1px solid #ff6600; border-radius: 6px;"><strong style="font-weight: bold; color: #1a1a1a;">TL;DR</strong><br/>- Wall-X 不是一个“整套靠自定义算子重写”的模型。<br/>- 除了 MoE、RoPE 和视觉 window/index 相关算子，主体仍然是 PyTorch 技术栈。<br/>- 它不是 MLA 路线，文本主干还是标准 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">QKV + GQA</code>。<br/>- 当前常见推理配置下，文本走 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">SDPA</code>，视觉走 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">FlashAttention2</code>。<br/>- 如果想优化推理，先看结构，再看 kernel。</section>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">一、为什么不能一上来就盯 CUDA</h2>
+<p style="margin: 10px 0; text-align: justify;">看一个模型项目时，最容易犯的错误，就是看到 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">csrc/ops.cu</code>、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">PYBIND11_MODULE</code>、若干自定义 kernel，然后脑子里自动补一句：</p>
+<p style="margin: 10px 0; text-align: justify;">“这个项目的核心复杂度肯定都在 CUDA 里。”</p>
+<p style="margin: 10px 0; text-align: justify;">Wall-X 不是这样。</p>
+<p style="margin: 10px 0; text-align: justify;">它的确有自定义算子，但这些算子并没有覆盖整套模型主干。更准确地说，Wall-X 的自定义算子主要集中在几条性能敏感路径上，而不是把整套多模态建模框架都重写了一遍。</p>
+<p style="margin: 10px 0; text-align: justify;">所以理解它的更好顺序不是：</p>
+<ol style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">先看 CUDA</li><li style="margin: 6px 0;">再反推模型</li></ol>
+<p style="margin: 10px 0; text-align: justify;">而是：</p>
+<ol style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">先看模型结构</li><li style="margin: 6px 0;">再确认哪些局部路径下沉成了 CUDA</li></ol>
+<p style="margin: 10px 0; text-align: justify;">这个顺序一旦反过来，很多问题你都会问偏。比如：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">它为什么没有 MLA？</li><li style="margin: 6px 0;">它的 attention 为什么看起来还是标准 QKV？</li><li style="margin: 6px 0;">为什么视觉分支又在用 FlashAttention？</li></ul>
+<p style="margin: 10px 0; text-align: justify;">这些问题本身没错，但它们都建立在同一个前提上：你默认 Wall-X 应该是一套“从注意力到底层 kernel 都被完全重写”的模型。</p>
+<p style="margin: 10px 0; text-align: justify;">这个前提不成立。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">二、Wall-X 到底有哪些自定义算子</h2>
+<p style="margin: 10px 0; text-align: justify;">如果只看导出给 Python 的接口，Wall-X 的自定义算子其实非常集中，大致就是这几类：</p>
+<pre style="display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">asym_dual_gmm
+permute
+unpermute
+unpermute_bwd
+rope
+rope_bwd
+rope_index
+rot_pos_emb
+get_window_index</pre>
+<p style="margin: 10px 0; text-align: justify;">它们基本可以分成三组：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">MoE 相关：<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">asym_dual_gmm</code>、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">permute</code>、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">unpermute</code></li><li style="margin: 6px 0;">RoPE / 多模态位置编码相关：<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">rope</code>、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">rope_index</code>、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">rot_pos_emb</code></li><li style="margin: 6px 0;">视觉窗口索引相关：<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">get_window_index</code></li></ul>
+<p style="margin: 10px 0; text-align: justify;">这说明什么？</p>
+<p style="margin: 10px 0; text-align: justify;">说明 Wall-X 的自定义算子是“局部关键路径下沉”，不是“模型主体换了一套框架”。</p>
+<p style="margin: 10px 0; text-align: justify;">也就是说，如果把这些算子先放到一边，剩下的大部分模型组织方式，你还是能按一套比较标准的 PyTorch / Transformers 风格去理解。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">三、为什么说它不是重度自定义推理框架</h2>
+<p style="margin: 10px 0; text-align: justify;">判断一个项目是不是“重度自定义推理框架”，关键不是看它有没有 CUDA 扩展，而是看它有没有把模型最核心的计算主干整套换掉。</p>
+<p style="margin: 10px 0; text-align: justify;">Wall-X 没有这么做。</p>
+<p style="margin: 10px 0; text-align: justify;">它的主体路径里，仍然能看到这些非常熟悉的部件：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">视觉编码器</li><li style="margin: 6px 0;">文本 decoder</li><li style="margin: 6px 0;">embedding 替换</li><li style="margin: 6px 0;">decoder layers</li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">lm_head</code></li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">generate()</code></li></ul>
+<p style="margin: 10px 0; text-align: justify;">attention 核本身也没有换成什么全新的数学形式。文本分支依然可以落到 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">scaled_dot_product_attention</code>，视觉分支依然可以落到 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">flash_attn_varlen_func</code>。</p>
+<p style="margin: 10px 0; text-align: justify;">所以更准确的描述应该是：</p>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">Wall-X 是在 Qwen2.5-VL 这条多模态主干上，围绕 MoE、位置编码和动作生成做了定向增强。</blockquote>
+<p style="margin: 10px 0; text-align: justify;">这句话很关键。因为它直接影响你后面的优化思路。</p>
+<p style="margin: 10px 0; text-align: justify;">如果你把它想成“全自定义推理系统”，你自然会先去盯 kernel。 但如果你把它理解成“标准多模态主干 + 局部增强”，那你就会先去看调用链和结构分工。</p>
+<p style="margin: 10px 0; text-align: justify;">后者更接近事实。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">四、它为什么没有 MLA，只有标准 QKV + GQA</h2>
+<p style="margin: 10px 0; text-align: justify;">很多人一看到“大模型推理优化”，脑子里第一反应就是 MLA。</p>
+<p style="margin: 10px 0; text-align: justify;">但 Wall-X 这条线不是 MLA。</p>
+<p style="margin: 10px 0; text-align: justify;">它的文本 attention 结构仍然是很标准的：</p>
+<pre style="display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">q_proj
+k_proj
+v_proj</pre>
+<p style="margin: 10px 0; text-align: justify;">然后再根据 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">num_key_value_heads</code> 和 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">repeat_kv</code> 做 GQA。</p>
+<p style="margin: 10px 0; text-align: justify;">换句话说，它的文本主干更接近：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">QKV + GQA</code></li><li style="margin: 6px 0;">而不是 MLA</li></ul>
+<p style="margin: 10px 0; text-align: justify;">这里一定要避免一个误解：</p>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">没有 MLA，不代表这个模型“低级”。</blockquote>
+<p style="margin: 10px 0; text-align: justify;">它只说明一件事：Wall-X 继承的是 Qwen2.5-VL 这一路的主干结构。 你后面做优化，也应该围绕这个真实存在的结构去想办法，而不是围绕一个并不存在的 MLA 去脑补。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">五、文本为什么走 SDPA，视觉为什么走 FlashAttention2</h2>
+<p style="margin: 10px 0; text-align: justify;">Wall-X 还有一个很容易被忽略的点：</p>
+<p style="margin: 10px 0; text-align: justify;">它不是所有分支统一用同一种 attention 后端。</p>
+<p style="margin: 10px 0; text-align: justify;">当前常见推理配置下：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">文本主干走 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">SDPA</code></li><li style="margin: 6px 0;">视觉主干走 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">FlashAttention2</code></li></ul>
+<p style="margin: 10px 0; text-align: justify;">这件事看起来只是实现细节，但实际上非常重要。</p>
+<p style="margin: 10px 0; text-align: justify;">因为它进一步说明：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">Wall-X 的复杂度不是“全部换成一套神秘 attention”</li><li style="margin: 6px 0;">而是“不同分支按自己的场景选后端”</li></ul>
+<p style="margin: 10px 0; text-align: justify;">文本这边更像标准 decoder 栈。 视觉这边则是 Vision Transformer 里的高效 attention 路线。</p>
+<p style="margin: 10px 0; text-align: justify;">所以你如果只用一个词去概括整个模型，比如“它就是 FlashAttention 模型”或者“它就是自定义 attention 模型”，都不准确。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">六、如果你真要优化它，第一步该看什么</h2>
+<p style="margin: 10px 0; text-align: justify;">如果你的目标是优化 Wall-X 推理速度，我会建议你按这个顺序看：</p>
+<ol style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">先搞清楚推理入口和输入张量怎么组织</li><li style="margin: 6px 0;">再搞清楚视觉分支和文本分支怎么合流</li><li style="margin: 6px 0;">再看 decoder 里的 MoE 到底插在哪里</li><li style="margin: 6px 0;">最后才去看自定义 CUDA 算子到底占了多少比重</li></ol>
+<p style="margin: 10px 0; text-align: justify;">这个顺序的好处是，你能先找到“结构性瓶颈”，而不是一开始就陷进某个局部 kernel 的细节里。</p>
+<p style="margin: 10px 0; text-align: justify;">否则很容易出现一种典型情况：</p>
+<p style="margin: 10px 0; text-align: justify;">你在做推理优化，结果一路都在追问：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">为什么它没有 MLA？</li><li style="margin: 6px 0;">为什么它只有 MHA/GQA 和 FlashAttention？</li></ul>
+<p style="margin: 10px 0; text-align: justify;">这恰恰说明你先看结构是对的。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">七、这一篇真正想立住的判断</h2>
+<p style="margin: 10px 0; text-align: justify;">如果把这篇文章压成一句话，那就是：</p>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">Wall-X 不是一个“除了 CUDA 什么都不用看”的模型。它的自定义算子主要服务于 MoE 和位置编码，主体仍然是 Qwen2.5-VL 这条多模态主干。想优化它，第一步不是改 kernel，而是先看清结构。</blockquote>
+<p style="margin: 10px 0; text-align: justify;">下一篇我会顺着这条思路往下走，直接从推理入口开始，看它的数据加载、prompt 构造和模型加载到底是怎么接起来的。</p>
+</body>
+</html>

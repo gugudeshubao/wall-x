@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>WeChat Article</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 16px; color: #333; line-height: 1.8; padding: 0 10px;">
+<h1 style="font-size: 24px; font-weight: bold; color: #1a1a1a; text-align: center; margin: 30px 0 20px; padding-bottom: 10px; border-bottom: 2px solid #333;">Wall-X 的 MoE 到底加在了哪里：从 Decoder Layer 到 Token 路由</h1>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">很多人一听到 MoE，就会自动把它想成“把 FFN 换成专家 MLP”。Wall-X 的做法比这个更深入一点。</blockquote>
+<section style="margin: 16px 0; padding: 16px; background: #fff8f0; border: 1px solid #ff6600; border-radius: 6px;"><strong style="font-weight: bold; color: #1a1a1a;">TL;DR</strong><br/>- Wall-X 的 MoE 不在视觉分支，而在 decoder 里。<br/>- 它不是只改 MLP，而是把 decoder layer 整体做成了可路由版本。<br/>- <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">moe_token_types</code> 是核心路由信号，当前常见场景下基本就是“普通 token”和“action token”两类。<br/>- <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">start_indices / end_indices</code> 表示 expert 重排后连续 token 段的边界。<br/>- <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">attention_moe</code> 改的是 expert-specific 的投影，不是另起一套 attention 数学。</section>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">一、先把结论说清楚：MoE 不在视觉分支</h2>
+<p style="margin: 10px 0; text-align: justify;">Wall-X 的视觉主干还是上一篇讲的那套东西：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">patch_embed</code></li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">rot_pos_emb</code></li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">get_window_index</code></li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">vision blocks</code></li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">merger</code></li></ul>
+<p style="margin: 10px 0; text-align: justify;">真正被 MoE 化的不是视觉编码器，而是 decoder。</p>
+<p style="margin: 10px 0; text-align: justify;">顶层模型里最关键的一句其实很朴素：</p>
+<pre style="display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">self.model = Qwen2_5_VLMoEModel(...)</pre>
+<p style="margin: 10px 0; text-align: justify;">这句话已经说明了大方向：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">视觉分支保留</li><li style="margin: 6px 0;">decoder 被替换成 MoE 版本</li></ul>
+<p style="margin: 10px 0; text-align: justify;">所以你如果后面分析 Wall-X 的 MoE 行为，重点应该一直放在统一序列进入 decoder 之后发生了什么。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">二、MoE 不是挂在 decoder 后面，而是长在 layer 里面</h2>
+<p style="margin: 10px 0; text-align: justify;">Wall-X 对基础 decoder 的改法，不是“外面再接个专家模块”，而是直接把每一层的定义换掉了：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">原版：<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">Qwen2_5_VLDecoderLayer</code></li><li style="margin: 6px 0;">Wall-X：<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">Qwen2_5_VLDecoderLayer_with_MoE</code></li></ul>
+<p style="margin: 10px 0; text-align: justify;">这意味着什么？</p>
+<p style="margin: 10px 0; text-align: justify;">意味着 MoE 不是在 decoder 之外补一层，而是直接进入 layer 内部计算流程。</p>
+<p style="margin: 10px 0; text-align: justify;">一个带 MoE 的 decoder layer，大致执行顺序是：</p>
+<pre style="display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">输入
+-&gt; 第一次 norm MoE
+-&gt; attention（可能是 joint attention）
+-&gt; gated residual
+-&gt; 第二次 norm MoE
+-&gt; MLP MoE
+-&gt; gated residual
+-&gt; 输出</pre>
+<p style="margin: 10px 0; text-align: justify;">这说明 Wall-X 的 MoE 不只是“专家 MLP”，而是围绕 token 路由把 norm、attention、MLP 一起改了。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">三、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">moe_token_types</code> 才是这套路由的核心</h2>
+<p style="margin: 10px 0; text-align: justify;">Wall-X 的 router 其实没有大家想象得那么玄。</p>
+<p style="margin: 10px 0; text-align: justify;">它的路由核心信号是：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">moe_token_types</code></li></ul>
+<p style="margin: 10px 0; text-align: justify;">而这个东西在训练和推理里，通常都来自同一个简单规则：</p>
+<pre style="display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">inputs.input_ids == action_token_id</pre>
+<p style="margin: 10px 0; text-align: justify;">也就是说，在当前最常见的两 expert 场景下：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">普通 token -> 0</li><li style="margin: 6px 0;">action token -> 1</li></ul>
+<p style="margin: 10px 0; text-align: justify;">再往下看 router：</p>
+<pre style="display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">experts_indices = token_types % num_experts</pre>
+<p style="margin: 10px 0; text-align: justify;">你会发现它并不是那种经典 top-k learned router，而更像显式 token 语义路由。</p>
+<p style="margin: 10px 0; text-align: justify;">这其实很符合 Wall-X 的任务特点。因为这里 token 的语义分工本来就比较明确：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">普通上下文 token</li><li style="margin: 6px 0;">动作 token</li></ul>
+<p style="margin: 10px 0; text-align: justify;">既然语义已经很清楚，就没有必要再硬做一个复杂到难解释的在线路由器。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">四、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">start_indices / end_indices</code> 到底是什么</h2>
+<p style="margin: 10px 0; text-align: justify;">第一次看到这两个名字时，很多人会觉得抽象。 其实它们的含义很简单：</p>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">如果把 token 按 expert 分组重排，那么每个 expert 在这条重排后序列里会占一个连续片段，<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">start_indices / end_indices</code> 就是在标这个片段的左右边界。</blockquote>
+<p style="margin: 10px 0; text-align: justify;">顶层模型里如果这两个值没有传进来，会根据 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">moe_token_types</code> 现算每个 expert 的 token 数量，再做 cumulative sum。</p>
+<p style="margin: 10px 0; text-align: justify;">所以这两个变量并不神秘，它们只是 MoE 重排后的“段描述符”。</p>
+<p style="margin: 10px 0; text-align: justify;">一旦理解了这一点，后面很多实现细节都会自然很多：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">为什么 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">mot_opt</code> 里要先 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">permute</code></li><li style="margin: 6px 0;">为什么 MoE block 里总在按 expert 分段处理</li><li style="margin: 6px 0;">为什么最后还要 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">unpermute</code></li></ul>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">五、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">mot_opt=True</code> 时，Wall-X 会先把 token 按 expert 排好</h2>
+<p style="margin: 10px 0; text-align: justify;">这是 Wall-X MoE 实现里最工程化、也最实用的一步。</p>
+<p style="margin: 10px 0; text-align: justify;">如果不开 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">mot_opt</code>，模型仍然可以在原序列布局里用 mask 去挑 token。 但如果开了 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">mot_opt</code>，它会先把 token 按 expert 分组重排：</p>
+<pre style="display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">hidden_states = permute(hidden_states, moe_token_types)</pre>
+<p style="margin: 10px 0; text-align: justify;">这么做的好处非常直接：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">同一个 expert 的 token 变成连续段</li><li style="margin: 6px 0;">norm、MLP、输出投影都更容易按连续内存块处理</li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">start_indices / end_indices</code> 的作用也会变得非常直观</li></ul>
+<p style="margin: 10px 0; text-align: justify;">最后再用 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">unpermute(...)</code> 把顺序还原。</p>
+<p style="margin: 10px 0; text-align: justify;">所以 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">mot_opt</code> 本质上是一种执行优化，而不是建模逻辑变化。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">六、Wall-X 的 MoE 不只改 MLP</h2>
+<p style="margin: 10px 0; text-align: justify;">这是最值得反复强调的一点。</p>
+<p style="margin: 10px 0; text-align: justify;">很多人默认 MoE = 专家 MLP。 在 Wall-X 里，这个理解只对了一部分。</p>
+<h3 style="font-size: 17px; font-weight: bold; color: #333; margin: 22px 0 12px;">1. <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">norm_moe</code></h3>
+<p style="margin: 10px 0; text-align: justify;">如果开了 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">norm_moe</code>，模型会给每个 expert 准备独立的 norm，而不是所有 token 共用一套 RMSNorm。</p>
+<p style="margin: 10px 0; text-align: justify;">这说明 Wall-X 允许不同语义类型的 token，在进入 attention / MLP 之前就走不同的归一化路径。</p>
+<h3 style="font-size: 17px; font-weight: bold; color: #333; margin: 22px 0 12px;">2. <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">mlp_moe</code></h3>
+<p style="margin: 10px 0; text-align: justify;">这一部分最像大家熟悉的 MoE：多个 expert MLP，各自处理自己的 token 段。</p>
+<p style="margin: 10px 0; text-align: justify;">也正是这里，原始 dense MLP 和新增动作专家的区别最明显。</p>
+<h3 style="font-size: 17px; font-weight: bold; color: #333; margin: 22px 0 12px;">3. <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">attention_moe</code></h3>
+<p style="margin: 10px 0; text-align: justify;">这是 Wall-X 比较特别的地方。</p>
+<p style="margin: 10px 0; text-align: justify;">如果开了 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">attention_moe</code>，attention 不再共用一套 QKV/O 投影，而是每个 expert 自己维护：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">q_proj_experts</code></li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">k_proj_experts</code></li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">v_proj_experts</code></li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">o_proj_experts</code></li></ul>
+<p style="margin: 10px 0; text-align: justify;">注意，这里变的是投影生成方式，不是 attention 数学本身。 后面的 attention 仍然可以落到：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">scaled_dot_product_attention</code></li><li style="margin: 6px 0;">或 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">flash_attn</code></li></ul>
+<p style="margin: 10px 0; text-align: justify;">所以它不是 MLA，也不是完全自定义的新 attention，而是 expert-aware 的 QKV/O。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">七、mask 和 position 也跟着 token 语义一起变了</h2>
+<p style="margin: 10px 0; text-align: justify;">一旦你把专家路由真正放进统一序列里，MoE 就不可能只影响线性层。</p>
+<p style="margin: 10px 0; text-align: justify;">Wall-X 这里还改了两类东西：</p>
+<h3 style="font-size: 17px; font-weight: bold; color: #333; margin: 22px 0 12px;">1. 某些 action token 区域不再严格纯因果</h3>
+<p style="margin: 10px 0; text-align: justify;">在某些设置下，type-1 token 区域会被从纯 causal 约束里放开，让它们局部双向可见。</p>
+<p style="margin: 10px 0; text-align: justify;">这说明动作 token 不是简单塞进一个标准 next-token prediction 框架里，而是为了动作建模需求调整过可见性规则。</p>
+<h3 style="font-size: 17px; font-weight: bold; color: #333; margin: 22px 0 12px;">2. 位置编号也会重对齐</h3>
+<p style="margin: 10px 0; text-align: justify;">如果序列里混了 AR token 和 flow token，而且它们语义上属于不同阶段，那么原始的简单顺序位置就不一定最合适。</p>
+<p style="margin: 10px 0; text-align: justify;">所以 Wall-X 还会根据 token 类型去修正一部分 position ids。</p>
+<p style="margin: 10px 0; text-align: justify;">这一点非常重要，因为它说明 Wall-X 的复杂度不只是“多了几个专家”，而是：</p>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">专家路由、统一序列和动作语义被绑在了一起。</blockquote>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">八、这篇文章真正要立住的判断</h2>
+<p style="margin: 10px 0; text-align: justify;">如果把这篇压成一句话，那就是：</p>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">Wall-X 的 MoE 不是只改 FFN，而是直接长进了 decoder layer：token 先按 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">moe_token_types</code> 被分到不同 expert，随后 norm、attention、MLP、mask 和 position 都会围绕这套路由一起变化。</blockquote>
+<p style="margin: 10px 0; text-align: justify;">下一篇我会继续沿着统一序列这条线往下讲：Wall-X 到底是怎么生成动作的。</p>
+</body>
+</html>

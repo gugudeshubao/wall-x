@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>WeChat Article</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 16px; color: #333; line-height: 1.8; padding: 0 10px;">
+<h1 style="font-size: 24px; font-weight: bold; color: #1a1a1a; text-align: center; margin: 30px 0 20px; padding-bottom: 10px; border-bottom: 2px solid #333;">Wall-X 是怎么生成动作的：AR、Flow、KV Cache 和 Euler 积分</h1>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">Wall-X 不是一个“最后顺手接个 action head”的模型。它的动作生成链，本身就是这套系统里单独设计过的一部分。</blockquote>
+<section style="margin: 16px 0; padding: 16px; background: #fff8f0; border: 1px solid #ff6600; border-radius: 6px;"><strong style="font-weight: bold; color: #1a1a1a;">TL;DR</strong><br/>- Wall-X 至少有两条动作路径：AR 和 flow。<br/>- <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">generate()</code> 负责生成 token，<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">batch_decode()</code> 负责把 token 翻成人类可读文本。<br/>- AR 路径更像“先生成离散 action token，再解码成动作”。<br/>- flow 路径更像“从噪声出发，沿着向量场一步步推到最终动作”。<br/>- <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">generate_flow_action()</code> 的核心不只是采样，而是 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">prefix prefill + KV cache 截断 + postfix-only Euler 迭代</code>。</section>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">一、先把一个最容易混的点拆开</h2>
+<p style="margin: 10px 0; text-align: justify;">很多人看动作生成代码时，会把 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">generate()</code>、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">batch_decode()</code>、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">predict_action</code> 这些名字混成一团。</p>
+<p style="margin: 10px 0; text-align: justify;">其实它们不是一回事。</p>
+<p style="margin: 10px 0; text-align: justify;">最简单的区分是：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">model.generate(...)</code>：模型真的在自回归生成 token</li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">batch_decode(...)</code>：把 token id 反查成字符串</li></ul>
+<p style="margin: 10px 0; text-align: justify;">所以如果只压成一句话：</p>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">generate()</code> 是“生成”，<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">batch_decode()</code> 是“翻译”。</blockquote>
+<p style="margin: 10px 0; text-align: justify;">这在 AR 动作路径里尤其重要，因为 AR 模式下，模型先生成的是离散 action token，而不是直接吐连续动作张量。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">二、Wall-X 的动作路径至少有两条</h2>
+<h3 style="font-size: 17px; font-weight: bold; color: #333; margin: 22px 0 12px;">1. AR 路径</h3>
+<p style="margin: 10px 0; text-align: justify;">这条路径的思路很直接：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">先像语言模型一样生成 token</li><li style="margin: 6px 0;">这些 token 里有一段专门的 action token</li><li style="margin: 6px 0;">再把它们解码回动作序列</li></ul>
+<p style="margin: 10px 0; text-align: justify;">如果你只看这条路，它会很像“文本生成 + 特殊词表映射”。</p>
+<h3 style="font-size: 17px; font-weight: bold; color: #333; margin: 22px 0 12px;">2. flow 路径</h3>
+<p style="margin: 10px 0; text-align: justify;">这条路径就不一样了。</p>
+<p style="margin: 10px 0; text-align: justify;">它不是直接生成离散动作 token，而是：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">在输入里放连续动作占位 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">&lt;|action|&gt;</code></li><li style="margin: 6px 0;">每个时间步都把当前 noisy action 编成 embedding</li><li style="margin: 6px 0;">再送进统一序列</li><li style="margin: 6px 0;">让模型预测当前应该往哪个方向更新动作</li></ul>
+<p style="margin: 10px 0; text-align: justify;">从代码投入和完整度看，Wall-X 当前明显更重视这条 flow 路径。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">三、AR 路径到底在做什么</h2>
+<p style="margin: 10px 0; text-align: justify;">AR 动作路径可以压成这样：</p>
+<pre style="display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">prompt
+-&gt; generate()
+-&gt; 得到离散 token ids
+-&gt; 从中筛出 action token
+-&gt; 用 action tokenizer / processor 解码回连续动作</pre>
+<p style="margin: 10px 0; text-align: justify;">它的优点是：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">非常符合语言模型生成范式</li><li style="margin: 6px 0;">训练和推理接口直观</li></ul>
+<p style="margin: 10px 0; text-align: justify;">但它也有天然限制：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">连续动作最后还是被离散 token 化了</li></ul>
+<p style="margin: 10px 0; text-align: justify;">这也正是 flow 路径存在的原因。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">四、为什么 Wall-X 更像在押注 flow 路径</h2>
+<p style="margin: 10px 0; text-align: justify;">因为机器人动作天然是连续量：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">位置是连续的</li><li style="margin: 6px 0;">姿态是连续的</li><li style="margin: 6px 0;">动作序列的平滑性也是连续控制问题的一部分</li></ul>
+<p style="margin: 10px 0; text-align: justify;">如果把它们全都塞进离散 token 空间，表达上总会受限。 而 flow 路径更适合处理“从噪声逐步流到目标动作”这种连续生成问题。</p>
+<p style="margin: 10px 0; text-align: justify;">从这个角度看，Wall-X 的动作设计其实很清楚：</p>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">它不是只想让大模型“说出动作 token”，而是想让模型真正学会连续动作怎么被生成出来。</blockquote>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">五、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">ActionProcessor</code> 是动作链的核心中间层</h2>
+<p style="margin: 10px 0; text-align: justify;">理解 flow 路径，绕不过 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">ActionProcessor</code>。</p>
+<p style="margin: 10px 0; text-align: justify;">它在 Wall-X 里至少干了 4 件事：</p>
+<ol style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">把 proprioception 投成状态 embedding</li><li style="margin: 6px 0;">把 noisy action + timestep 投成 action embedding</li><li style="margin: 6px 0;">把 action hidden states 再投回动作空间</li><li style="margin: 6px 0;">在训练时构造 flow 目标并计算 flow loss</li></ol>
+<p style="margin: 10px 0; text-align: justify;">所以它不是一个狭义的 action head，更像动作侧的一整套接口层。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">六、它训练时到底学什么</h2>
+<p style="margin: 10px 0; text-align: justify;">Wall-X 动作训练最核心的几行，其实非常简单：</p>
+<pre style="display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">noise = torch.randn_like(action_chunk)
+time = sample_time(...)
+noisy_action = (1 - t) * noise + t * action_chunk
+flow = action_chunk - noise</pre>
+<p style="margin: 10px 0; text-align: justify;">这几行决定了它训练时真正学的不是“最终动作本体”，而是：</p>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">给定当前 noisy action 和当前时间 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">t</code>，应该往哪个方向更新，才能从噪声流向真实动作。</blockquote>
+<p style="margin: 10px 0; text-align: justify;">所以 Wall-X 的 flow 路径，本质上学的是动作空间里的向量场。</p>
+<p style="margin: 10px 0; text-align: justify;">这也是为什么后面推理时会自然出现 Euler / ODE 积分。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">七、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">flow_loss</code> 为什么是 MSE</h2>
+<p style="margin: 10px 0; text-align: justify;">既然模型学的是“更新方向”，那监督目标也就顺理成章了。</p>
+<p style="margin: 10px 0; text-align: justify;">动作 token 位置上的 hidden states 会被投回动作空间，得到当前预测的速度 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">v_pred</code>，然后用 MSE 去拟合上面构造好的 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">flow</code>。</p>
+<p style="margin: 10px 0; text-align: justify;">也就是说，flow loss 监督的不是“最终动作”，而是“当前时刻该怎么动”。</p>
+<p style="margin: 10px 0; text-align: justify;">这和扩散 / flow matching 这一路的方法是完全一致的。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">八、推理时为什么不是一次 forward 直接出动作</h2>
+<p style="margin: 10px 0; text-align: justify;">现在就可以回答一个很关键的问题：</p>
+<p style="margin: 10px 0; text-align: justify;">既然最终要的是动作，为什么不一次前向直接回归动作？</p>
+<p style="margin: 10px 0; text-align: justify;">答案很简单：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">因为训练时学的目标，本来就不是最终动作</li><li style="margin: 6px 0;">而是向量场</li></ul>
+<p style="margin: 10px 0; text-align: justify;">既然学的是向量场，推理时自然就不是一次回归，而是从初值开始迭代积分。</p>
+<p style="margin: 10px 0; text-align: justify;">换句话说：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">如果训练学的是 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">action</code></li><li style="margin: 6px 0;">一次回归很自然</li><li style="margin: 6px 0;">但如果训练学的是 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">d(action)/dt</code></li><li style="margin: 6px 0;">推理就自然要一步一步往前推</li></ul>
+<p style="margin: 10px 0; text-align: justify;">这就是 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">generate_flow_action()</code> 存在的根本原因。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">九、<code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">generate_flow_action()</code> 为什么这么长</h2>
+<p style="margin: 10px 0; text-align: justify;">很多人第一次看这段函数，最大的感受都是：怎么这么长？</p>
+<p style="margin: 10px 0; text-align: justify;">因为它不是只在做一个采样循环，而是在做一整套针对 flow 推理的工程优化。</p>
+<p style="margin: 10px 0; text-align: justify;">最关键的结构可以压成这样：</p>
+<pre style="display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">初始化 noise
+-&gt; prefix prefill
+-&gt; 第一次 Euler 更新
+-&gt; 截断 prefix KV cache
+-&gt; 只对 postfix action 区域反复迭代
+-&gt; odeint(..., method=&quot;euler&quot;)</pre>
+<p style="margin: 10px 0; text-align: justify;">理解这条链，Wall-X 的动作推理就顺了。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">十、第一阶段：prefix prefill</h2>
+<p style="margin: 10px 0; text-align: justify;">flow 推理不是一上来就进入循环，而是先做一次完整前向。</p>
+<p style="margin: 10px 0; text-align: justify;">这一步大致是：</p>
+<ol style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">令 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">noisy_action = noise</code></li><li style="margin: 6px 0;">用 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">ActionProcessor.step(...)</code> 把当前 noisy action 编成 action embedding</li><li style="margin: 6px 0;">把这些 embedding 填到 action token 位置</li><li style="margin: 6px 0;">用完整输入跑一遍模型</li></ol>
+<p style="margin: 10px 0; text-align: justify;">这一遍完整前向的意义，不只是“看一下当前输出”，更重要的是：</p>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">把前缀上下文的 KV cache 预热出来。</blockquote>
+<p style="margin: 10px 0; text-align: justify;">因为后面真正会变化的，主要是 action token 对应的后缀区域，前缀上下文其实是稳定的。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">十一、prefill 之后，先走一步 Euler</h2>
+<p style="margin: 10px 0; text-align: justify;">第一次完整前向跑完之后，代码会立刻从 action token 位置取出 hidden states，再投回动作空间，得到当前速度 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">v_0</code>。</p>
+<p style="margin: 10px 0; text-align: justify;">然后马上做一次：</p>
+<pre style="display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">noisy_action = noisy_action + dt * v_0</pre>
+<p style="margin: 10px 0; text-align: justify;">这其实就是一次显式 Euler 更新。</p>
+<p style="margin: 10px 0; text-align: justify;">你可以把它理解成：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">prefill 负责拿到第一个可靠方向</li><li style="margin: 6px 0;">然后先往前走一小步</li></ul>
+<p style="margin: 10px 0; text-align: justify;">这一步之后，模型就可以进入后面的 cache 复用阶段了。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">十二、为什么要截断 KV cache</h2>
+<p style="margin: 10px 0; text-align: justify;">这是整条实现里最有工程味的一步。</p>
+<p style="margin: 10px 0; text-align: justify;">prefill 之后，代码拿到了整条序列的 KV cache。 但它不会把整条 cache 原样带进后续循环，而是会把 cache 截断到 action 区域之前。</p>
+<p style="margin: 10px 0; text-align: justify;">原因很直接：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">前缀上下文是稳定的，适合缓存</li><li style="margin: 6px 0;">后缀 action 区域每一步都在变，不适合直接复用</li></ul>
+<p style="margin: 10px 0; text-align: justify;">所以最合理的做法就是：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">保留 prefix cache</li><li style="margin: 6px 0;">每一步只重算 postfix</li></ul>
+<p style="margin: 10px 0; text-align: justify;">这正是 Wall-X 后面能把 flow 推理做得更高效的关键。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">十三、真正省算力的是 postfix-only 迭代</h2>
+<p style="margin: 10px 0; text-align: justify;">截断完 cache 之后，代码会把后缀相关的东西单独切出来：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">postfix_inputs_embeds</code></li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">postfix_position_ids</code></li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">postfix_attention_mask</code></li><li style="margin: 6px 0;"><code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">postfix_moe_token_types</code></li></ul>
+<p style="margin: 10px 0; text-align: justify;">后面的每一步都只干一件事：</p>
+<ol style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">用当前 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">t</code> 和当前 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">noisy_action</code> 生成新的 action embedding</li><li style="margin: 6px 0;">把这些 embedding 填回 postfix 的 action token 位置</li><li style="margin: 6px 0;">带着 prefix cache 跑一次模型</li><li style="margin: 6px 0;">只读 action token 位置上的输出</li><li style="margin: 6px 0;">得到当前速度 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">v_t</code></li></ol>
+<p style="margin: 10px 0; text-align: justify;">这就是“前缀缓存，后缀重算”的标准结构。</p>
+<p style="margin: 10px 0; text-align: justify;">所以 Wall-X 的 flow 推理重点不是“积分器多高级”，而是“每一步 Transformer 前向尽量少重算”。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">十四、为什么最后会出现 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">odeint(..., method=&quot;euler&quot;)</code></h2>
+<p style="margin: 10px 0; text-align: justify;">现在前面的铺垫就都能接上了。</p>
+<p style="margin: 10px 0; text-align: justify;">模型每一步给出的不是最终动作，而是当前速度 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">v_t</code>。 那要从噪声走到最终动作，最自然的方法就是积分。</p>
+<p style="margin: 10px 0; text-align: justify;">Wall-X 这里调用的是：</p>
+<pre style="display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">odeint(step_with_kvcache, noisy_action, times[1:], method=&quot;euler&quot;)</pre>
+<p style="margin: 10px 0; text-align: justify;">这说明：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">数学上它确实把这件事看成一个连续时间系统</li><li style="margin: 6px 0;">工程上它用了最朴素、最稳定、也最够用的 Euler 方法</li></ul>
+<p style="margin: 10px 0; text-align: justify;">对 Wall-X 这种场景来说，这个选择很务实。 因为真正的瓶颈不在“高阶积分器”，而在每一步模型前向开销。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">十五、这条动作链为什么值得单独看</h2>
+<p style="margin: 10px 0; text-align: justify;">Wall-X 的动作生成最特别的地方，并不是“它会输出动作”，而是：</p>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">它把动作生成完整嵌进了统一多模态序列和 decoder 主干里。</blockquote>
+<p style="margin: 10px 0; text-align: justify;">这意味着：</p>
+<ul style="margin: 10px 0; padding-left: 24px;"><li style="margin: 6px 0;">动作不是一个完全独立的小头</li><li style="margin: 6px 0;">每个 timestep 的 noisy action 都会先变成 token 级 embedding</li><li style="margin: 6px 0;">然后和视觉、文本、状态一起进入同一条 Transformer 链</li><li style="margin: 6px 0;">最后再通过动作投影回到连续动作空间</li></ul>
+<p style="margin: 10px 0; text-align: justify;">这就是为什么你看起来像是在分析一个 VLM，但最后会碰到一整套连续动作生成工程。</p>
+<h2 style="font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;">十六、这篇文章真正要立住的判断</h2>
+<p style="margin: 10px 0; text-align: justify;">如果把这篇压成一句话，那就是：</p>
+<blockquote style="margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;">Wall-X 的动作生成不是“最后接个回归头”这么简单，而是分成了 AR 和 flow 两条路径；其中更核心的 flow 路径会把 noisy action 编成 token embedding 塞回统一序列，再通过 <code style="background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;">prefix prefill + KV cache 截断 + postfix-only Euler 迭代</code>，一步步从噪声推到最终动作。</blockquote>
+<p style="margin: 10px 0; text-align: justify;">下一篇就是这个系列的训练篇。到那时，我们会把“这些能力到底是怎么训练出来的”补完整。</p>
+</body>
+</html>
