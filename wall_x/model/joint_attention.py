@@ -9,10 +9,17 @@ from wall_x.fusions import ops
 from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl import (
     apply_multimodal_rotary_pos_emb,
 )
-from flash_attn import flash_attn_func
-from transformers.modeling_flash_attention_utils import (
-    is_flash_attn_greater_or_equal_2_10,
-)
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    flash_attn_func = None
+try:
+    from transformers.modeling_flash_attention_utils import (
+        is_flash_attn_greater_or_equal_2_10,
+    )
+except ImportError:
+    def is_flash_attn_greater_or_equal_2_10():
+        return False
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VLRotaryEmbedding,
     repeat_kv,

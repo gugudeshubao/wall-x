@@ -2,8 +2,14 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint as cp
 
-from torch.distributed.fsdp import MixedPrecision as MP
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+try:
+    from torch.distributed.fsdp import MixedPrecision as MP
+except (ImportError, ModuleNotFoundError):
+    MP = None
+try:
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+except (ImportError, ModuleNotFoundError):
+    FSDP = None
 
 from wall_x.fusions import ops
 

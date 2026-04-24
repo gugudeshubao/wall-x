@@ -11,10 +11,13 @@ from torch.distributions import Beta
 
 def print_rank_last(message):
     """If distributed is initialized, print only on last rank."""
-    if torch.distributed.is_initialized():
-        if torch.distributed.get_rank() == (torch.distributed.get_world_size() - 1):
+    try:
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() == (torch.distributed.get_world_size() - 1):
+                print(message, flush=True)
+        else:
             print(message, flush=True)
-    else:
+    except AttributeError:
         print(message, flush=True)
 
 
