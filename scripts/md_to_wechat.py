@@ -5,15 +5,17 @@ import sys
 import html
 
 # WeChat-compatible inline styles
+# IMPORTANT: Use single quotes for CSS font names to avoid breaking HTML double-quoted attributes
 STYLES = {
-    'body': 'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 16px; color: #333; line-height: 1.8; padding: 0 10px;',
+    'body': "font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 16px; color: #333; line-height: 1.8; padding: 0 10px;",
     'h1': 'font-size: 24px; font-weight: bold; color: #1a1a1a; text-align: center; margin: 30px 0 20px; padding-bottom: 10px; border-bottom: 2px solid #333;',
     'h2': 'font-size: 20px; font-weight: bold; color: #1a1a1a; margin: 28px 0 16px; padding-left: 10px; border-left: 4px solid #ff6600;',
     'h3': 'font-size: 17px; font-weight: bold; color: #333; margin: 22px 0 12px;',
+    'h4': 'font-size: 16px; font-weight: bold; color: #444; margin: 16px 0 10px;',
     'p': 'margin: 10px 0; text-align: justify;',
     'blockquote': 'margin: 16px 0; padding: 12px 16px; background: #f7f7f7; border-left: 4px solid #ff6600; color: #666; font-size: 15px;',
-    'code_block': 'display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: "SF Mono", "Fira Code", Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;',
-    'code_inline': 'background: #f0f0f0; color: #e83e8c; font-family: "SF Mono", Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;',
+    'code_block': "display: block; margin: 14px 0; padding: 14px; background: #1e1e1e; color: #d4d4d4; font-family: 'SF Mono', 'Fira Code', Menlo, monospace; font-size: 13px; line-height: 1.6; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;",
+    'code_inline': "background: #f0f0f0; color: #e83e8c; font-family: 'SF Mono', Menlo, monospace; font-size: 14px; padding: 2px 6px; border-radius: 3px;",
     'table': 'width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px;',
     'th': 'background: #f5f5f5; font-weight: bold; text-align: left; padding: 8px 10px; border: 1px solid #ddd;',
     'td': 'padding: 8px 10px; border: 1px solid #ddd; text-align: left;',
@@ -22,17 +24,20 @@ STYLES = {
     'li': 'margin: 6px 0;',
     'hr': 'border: none; border-top: 1px solid #ddd; margin: 24px 0;',
     'strong': 'font-weight: bold; color: #1a1a1a;',
+    'em': 'font-style: italic; color: #666;',
     'tldr_box': 'margin: 16px 0; padding: 16px; background: #fff8f0; border: 1px solid #ff6600; border-radius: 6px;',
     'img_caption': 'text-align: center; font-size: 13px; color: #999; margin-top: 6px;',
 }
 
 
 def process_inline(text):
-    """Process inline markdown: bold, inline code, links."""
+    """Process inline markdown: bold, italic, inline code, links."""
     # Inline code (before bold, to avoid conflicts)
     text = re.sub(r'`([^`]+)`', lambda m: f'<code style="{STYLES["code_inline"]}">{html.escape(m.group(1))}</code>', text)
     # Bold
     text = re.sub(r'\*\*([^*]+)\*\*', lambda m: f'<strong style="{STYLES["strong"]}">{m.group(1)}</strong>', text)
+    # Italic (single *, processed after bold removes **)
+    text = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', lambda m: f'<em style="{STYLES["em"]}">{m.group(1)}</em>', text)
     # Links [text](url)
     text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" style="color: #ff6600; text-decoration: none;">\1</a>', text)
     return text
@@ -101,7 +106,7 @@ def convert_md_to_html(md_text):
             continue
 
         # Headings
-        heading_match = re.match(r'^(#{1,3})\s+(.+)$', line)
+        heading_match = re.match(r'^(#{1,4})\s+(.+)$', line)
         if heading_match:
             level = len(heading_match.group(1))
             text = process_inline(heading_match.group(2))

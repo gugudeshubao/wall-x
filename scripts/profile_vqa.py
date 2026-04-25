@@ -21,6 +21,9 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=64)
     parser.add_argument("--ncu_mode", action="store_true",
                         help="NCU mode: no warmup, max_new_tokens=16, single run")
+    parser.add_argument("--attn", default="flash_attention_2",
+                        choices=["sdpa", "flash_attention_2", "eager"],
+                        help="Attention implementation (default: flash_attention_2)")
     args = parser.parse_args()
 
     if args.ncu_mode:
@@ -30,15 +33,34 @@ def main():
     from transformers import AutoProcessor
     from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl_act import Qwen2_5_VLMoEForAction
     from PIL import Image
+    from safetensors.torch import load_file
+    import glob
 
-    print(f"Loading model from {args.model_path} ...")
+    print(f"Loading model from {args.model_path} (attn={args.attn}) ...")
     t0 = time.time()
-    model = Qwen2_5_VLMoEForAction.from_pretrained(args.model_path)
-    model.eval().to("cuda").bfloat16()
+
+    # Load config and set attention implementation
+    config_path = os.path.join(args.model_path, "config.json")
+    model_config = Qwen2_5_VLMoEForAction.config_class.from_pretrained(config_path)
+    model_config._attn_implementation = args.attn
+
+    # Load processor and construct model
+    processor = AutoProcessor.from_pretrained(args.model_path, use_fast=True)
+    model = Qwen2_5_VLMoEForAction(model_config, processor=processor)
+    model.resize_token_embeddings(len(processor.tokenizer))
+
+    # Load weights
+    safetensor_files = glob.glob(os.path.join(args.model_path, "*.safetensors"))
+    state_dict = {}
+    for f in safetensor_files:
+        sd = load_file(f, device="cpu")
+        state_dict.update(sd)
+    model.load_state_dict(state_dict, strict=False)
+
+    model.eval().to("cuda", dtype=torch.bfloat16)
     load_time = time.time() - t0
     print(f"Model loaded in {load_time:.1f}s, peak GPU: {torch.cuda.max_memory_allocated()/1024**3:.2f} GB")
-
-    processor = model.processor
+    print(f"Attention: {model_config._attn_implementation}")
 
     # ---- prepare input ----
     pil_img = Image.open(args.image).convert("RGB")

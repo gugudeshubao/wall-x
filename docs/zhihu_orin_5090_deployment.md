@@ -610,10 +610,10 @@ RTX 5090 的 14ms 动作预测延迟让人兴奋——这意味着 70Hz 的控�
 
 本文是 **wall-x 机器人大模型部署系列** 的第一篇。后续文章计划：
 
-**第二篇：在 Orin 上攻克 Flash Attention 2 + 算子性能优化**
-- 本文中 Flash Attention 在 Orin 上编译未通过，但我们并不打算就此放弃。从 profiling 数据来看，Softmax 未融合（57 倍差距）是 SDPA 路线最大的代价，而 Flash Attention 2 有可能从根本上解决这个问题
-- 下一篇将详细记录在 aarch64 + SM 8.7 上编译 Flash Attention 2 的完整过程，验证 Softmax 融合后的实际性能提升
-- 同时尝试 INT8/INT4 量化、torch.compile 等优化手段，逐个压榨 Top-5 耗时算子的性能
+**第二篇：当算子逼近硬件极限——一次 Orin Profiling 引发的具身智能实时系统思考**
+- FA2 在 Orin 上编译通了，快 27%，但深度 profiling 发现：GEMM 已触达带宽天花板（cuBLAS 利用率 72%），67% 时间是 Python 框架空转
+- 三条 Flash Attention 路线对比（开源 FA2 / TRT-LLM cubin / FlashInfer），cuDNN SDPA 绕过 attention_mask 后接近 TRT-LLM 性能
+- 核心观点：具身智能的瓶颈不在 model，而在 runtime——VLA 是有损压缩的物理模拟器，刷新率比单次精度更重要
 
 **第三篇：C++ 推理引擎——从 Python 到生产部署**
 - 用 C++ / libtorch 替代 Python 推理，消除 Python GIL 和解释器开销
