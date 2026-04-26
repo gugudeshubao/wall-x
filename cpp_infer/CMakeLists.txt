@@ -1,0 +1,140 @@
+cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
+project(wallx_infer LANGUAGES CXX CUDA)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+# --- Find dependencies ---
+# libtorch (from PyTorch installation)
+find_package(Torch REQUIRED)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+
+# CUDA
+find_package(CUDAToolkit REQUIRED)
+
+# cuDNN (JetPack installs at system level, not via CUDAToolkit)
+find_library(CUDNN_LIBRARY cudnn
+    HINTS /usr/lib/aarch64-linux-gnu /usr/local/cuda/lib64)
+find_path(CUDNN_INCLUDE_DIR cudnn.h
+    HINTS /usr/include /usr/local/cuda/include)
+if(CUDNN_LIBRARY)
+    message(STATUS "cuDNN library: ${CUDNN_LIBRARY}")
+    message(STATUS "cuDNN include: ${CUDNN_INCLUDE_DIR}")
+else()
+    message(WARNING "cuDNN not found, SDPA may not use cuDNN backend")
+endif()
+
+# Python (needed because csrc/*.cu includes torch/extension.h -> Python.h)
+find_package(Python3 COMPONENTS Development QUIET)
+if(Python3_FOUND)
+    message(STATUS "Python3 include: ${Python3_INCLUDE_DIRS}")
+else()
+    # Fallback: try to find Python include manually
+    execute_process(
+        COMMAND python3 -c "import sysconfig; print(sysconfig.get_path('include'))"
+        OUTPUT_VARIABLE PYTHON_INCLUDE_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    set(Python3_INCLUDE_DIRS ${PYTHON_INCLUDE_DIR})
+    message(STATUS "Python3 include (manual): ${Python3_INCLUDE_DIRS}")
+endif()
+
+# --- Paths ---
+set(WALLX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set(CSRC_DIR "${WALLX_ROOT}/csrc")
+set(CUTLASS_INCLUDE "${WALLX_ROOT}/3rdparty/cutlass/include")
+set(KERNELS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/kernels")
+
+# --- CUDA architecture for Jetson Orin ---
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 87)
+endif()
+
+# --- Compile flags ---
+set(CUDA_NVCC_FLAGS
+    -std=c++17
+    -DENABLE_BF16
+    -DGROUPED_GEMM_DEVICE_CAPABILITY=87
+    --generate-code=arch=compute_87,code=sm_87
+    -O3
+    --use_fast_math
+)
+
+# --- Custom CUDA operators from wall-x csrc ---
+set(CSRC_SOURCES
+    ${CSRC_DIR}/dual_asym_grouped_gemm.cu
+    ${CSRC_DIR}/permute.cu
+    ${CSRC_DIR}/rope.cu
+    ${CSRC_DIR}/rope_index.cu
+    ${CSRC_DIR}/rot_pos.cu
+    ${CSRC_DIR}/window_index.cu
+)
+
+# Build csrc as a static library
+add_library(wallx_cuda_ops STATIC ${CSRC_SOURCES})
+target_include_directories(wallx_cuda_ops PUBLIC
+    ${CSRC_DIR}
+    ${CUTLASS_INCLUDE}
+    ${TORCH_INCLUDE_DIRS}
+    ${CUDNN_INCLUDE_DIR}
+    ${Python3_INCLUDE_DIRS}
+)
+target_compile_options(wallx_cuda_ops PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>
+)
+target_link_libraries(wallx_cuda_ops PUBLIC
+    ${TORCH_LIBRARIES}
+    CUDA::cudart
+    CUDA::cublas
+    ${CUDNN_LIBRARY}
+)
+set_target_properties(wallx_cuda_ops PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE ON
+)
+
+# --- Main inference engine ---
+set(INFER_SOURCES
+    src/main.cpp
+    src/weight_loader.cpp
+    src/triton_loader.cpp
+    src/kv_cache.cpp
+    src/attention.cpp
+    src/moe.cpp
+    src/transformer.cpp
+    src/vision.cpp
+    src/action_head.cpp
+    src/ode_solver.cpp
+    src/model.cpp
+)
+
+add_executable(wallx_infer ${INFER_SOURCES})
+target_include_directories(wallx_infer PRIVATE
+    src/
+    ${CSRC_DIR}
+    ${CUTLASS_INCLUDE}
+    ${TORCH_INCLUDE_DIRS}
+    ${CUDNN_INCLUDE_DIR}
+)
+target_link_libraries(wallx_infer PRIVATE
+    wallx_cuda_ops
+    ${TORCH_LIBRARIES}
+    CUDA::cudart
+    CUDA::cuda_driver  # For cubin loading (cuModuleLoad, etc.)
+    CUDA::cublas
+    ${CUDNN_LIBRARY}
+)
+target_compile_options(wallx_infer PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>
+)
+target_compile_definitions(wallx_infer PRIVATE
+    KERNELS_DIR="${KERNELS_DIR}"
+)
+
+# --- Print build info ---
+message(STATUS "CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+message(STATUS "Torch libraries: ${TORCH_LIBRARIES}")
+message(STATUS "CUTLASS include: ${CUTLASS_INCLUDE}")
+message(STATUS "CSRC directory: ${CSRC_DIR}")
+message(STATUS "Kernels directory: ${KERNELS_DIR}")
