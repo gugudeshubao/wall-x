@@ -4,7 +4,7 @@
 
 **TL;DR**
 - 第二篇的核心发现：Python VQA 推理每步 97.2ms，仅 29.7ms GPU 计算，67.5ms 框架开销——GPU 利用率只有 32.7%
-- **torch.compile 在 Orin aarch64 上不可用**——inductor 后端依赖 triton，triton 不支持 ARM
+- **torch.compile 对 wall-x 无效**——6 个自定义 CUDA 算子导致 ~120 次 graph break，编译区域碎片化，收益为零
 - wall-x 有 **6 个自定义 CUDA 算子**（MoE permute/unpermute、asym_dual_gmm、multimodal_rope 等），纯 TensorRT 路线需要写 6 个 IPluginV2——成本不现实
 - 最终路线：**libtorch C++ 全管线手写**——22 个 C++ 源文件，覆盖 ViT → Transformer → MoE → ODE 完整推理
 - 关键设计：不用 torch.jit.trace，自定义 CUDA ops 直接编译链接；SDPA 替代 FA2（第二篇发现绕过 `attention_mask` 后 cuDNN SDPA ≈ TRT-LLM 性能）
@@ -48,25 +48,40 @@ wall-x 在 Orin 上的 VQA 推理（文本生成），本质上就是标准的 a
 
 ---
 
-## 二、第一个尝试方向：torch.compile——行不通
+## 二、第一个尝试方向：torch.compile——对 wall-x 无效
 
 很多人第一反应是"上 torch.compile 不就完了"。PyTorch 2.x 的 torch.compile 确实能把 Python 层编译成优化的 C++/CUDA 代码，减少 dispatch 开销。
 
-但 **Orin 上用不了**。
+但 **torch.compile 对 wall-x 基本无效**。
 
-原因链：
+> 注：Triton 3.6.0 在 Orin aarch64 上**可以正常工作**——我们在第二篇已经验证过，JIT 编译和 benchmark 都跑通了。inductor 后端也能启动。问题不在 Triton 本身。
+
+**真正的问题：wall-x 的 6 个自定义 CUDA 算子导致 graph break。**
+
 ```
-torch.compile
-  └── 默认使用 inductor 后端
-        └── inductor 生成 triton kernel 做 CUDA 代码生成
-              └── triton 不支持 aarch64 (ARM)
-                    └── Orin 是 aarch64
-                          └── 死路
+torch.compile 对 wall-x 的效果：
+
+model = torch.compile(model)  # 尝试编译
+
+Forward 执行：
+  [compiled region 1: embedding + layernorm]
+     ↓ ⚡ GRAPH BREAK: ops.multimodal_rope()  ← 自定义 CUDA op，编译器不认识
+  [Python fallback: multimodal_rope]
+     ↓ ⚡ GRAPH BREAK: ops.permute()           ← MoE permute
+  [Python fallback: permute + dual_gemm]
+     ↓ ⚡ GRAPH BREAK: ops.unpermute()          ← MoE unpermute
+  [compiled region 2: residual add]
+     ↓ ... 每层重复以上 graph break ...
+
+结果：36 层 × 每层 3-4 次 graph break = ~120 次 graph break
+     编译区域被切成碎片，进出编译区域的开销 > 省下的 dispatch 开销
 ```
 
-Orin 上的 PyTorch 是 NVIDIA 定制的 JetPack 版本（2.5.0a0+nv24.08），没有内置 triton，也没有 inductor 后端的 aarch64 支持。这不是"装个包就能解决"的问题——triton 的代码生成器根本没有 ARM CUDA 后端。
+torch.compile 的 inductor 后端遇到不认识的自定义 op 时，会"断开"当前的编译图（graph break），回退到 Python eager 执行。wall-x 的每个 transformer 层都调用 `multimodal_rope`、`permute`、`unpermute`、`dual_asym_gemm` 等自定义 CUDA 算子——**每次调用都触发 graph break**。
 
-**结论：torch.compile 在 Orin 上不可用，必须绕过。**
+36 层 transformer 产生约 120 次 graph break。编译区域被切成微小的碎片（几个 GEMM + 一个 LayerNorm），进出编译区域的 overhead 反而比原始 eager 模式更高。
+
+**结论：torch.compile 对有大量自定义 CUDA 算子的模型基本无效。wall-x 不是"装个 Triton 就能解决"的问题。**
 
 ---
 
@@ -560,7 +575,7 @@ Phase 1 的结果：
 
 | 方案 | 结论 | 验证状态 |
 |------|------|----------|
-| **torch.compile** | Orin aarch64 不支持 | ✗ 确认不可用 |
+| **torch.compile** | 6 个自定义 op 导致 ~120 次 graph break | ✗ 确认无效 |
 | **纯 TensorRT** | 6 个 plugin，成本过高 | ✗ 未采用 |
 | **TRT-LLM / llama.cpp** | Flow Action 不兼容 | ✗ 确认不可行 |
 | **libtorch C++** | 框架开销清零，554ms | **✓ 已验证** |
