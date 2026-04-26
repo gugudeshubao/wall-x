@@ -617,7 +617,7 @@ Phase 1 的结果：
 
 ---
 
-## 附录：Triton vs PyTorch 算子性能摸底（Orin SM 8.7）
+## 附录 A：Triton vs PyTorch 算子性能摸底（Orin SM 8.7）
 
 > 第二篇中我们验证了 Triton 3.6.0 在 Orin SM 8.7 上可以正常编译运行。这里补充实测数据，为后续 Triton fused kernel 优化提供基线参考。
 
@@ -641,6 +641,84 @@ Phase 1 的结果：
 - **优化方向**：用 Triton 写 fused kernel（residual_add + rmsnorm、gate × up fusion、RoPE + attn score），消除框架开销后再逐个验证实际收益
 
 > 数据来源：`scripts/bench_triton_vs_pytorch_orin.py`，Triton 3.6.0，Orin 64GB 锁频。详细分析见第二篇附录。
+
+---
+
+## 附录 B：Flash Attention 实现横评（Orin SM 8.7）
+
+> 我们测试了 Orin 上能跑的 **5 种 Attention 实现**，使用 wall-x 模型的真实 attention shape（GQA: 16 Q heads / 4 KV heads, head_dim=128, bf16）。
+
+### 测试的 5 种实现
+
+| 实现 | 来源 | 说明 |
+|------|------|------|
+| **MemEff SDPA** | PyTorch 内置，源自 [xformers](https://github.com/facebookresearch/xformers) | 基于 CUTLASS 的 memory-efficient attention |
+| **cuDNN SDPA** | PyTorch 内置，调用 NVIDIA cuDNN | NVIDIA 为自家 GPU 深度优化的 fused kernel |
+| **FA2 CUDA** | [flash-attn v2.8.3](https://github.com/Dao-AILab/flash-attention) | Tri Dao 的 FlashAttention-2 独立库，CUDA C++ 实现 |
+| **Triton FA** | flash-attn 内置 `flash_attn_triton.py` | 纯 Triton 实现的 FlashAttention |
+| **Math** | PyTorch 内置 | 朴素 `QK^T → scale → softmax → V`，三步独立 GEMM |
+
+### 4 个测试配置
+
+这些 shape 直接来自 wall-x 推理的 4 个真实阶段：
+
+| Config | batch | seq_q | seq_kv | Q heads | KV heads | head_dim | causal | 对应阶段 |
+|--------|-------|-------|--------|---------|----------|----------|--------|---------|
+| Prefill-420 | 1 | 420 | 420 | 16 | 4 | 128 | ✓ | 首次 Prefill |
+| Prefill-488 | 1 | 488 | 488 | 16 | 4 | 128 | ✓ | 长 prompt Prefill |
+| Postfix-32 | 1 | 32 | 420 | 16 | 4 | 128 | ✗ | ODE 循环 postfix |
+| Decode-1 | 1 | 1 | 420 | 16 | 4 | 128 | ✗ | 单步 decode |
+
+### 结果
+
+| Config | MemEff SDPA | cuDNN SDPA | FA2 CUDA | Triton FA | Math |
+|--------|------------|------------|----------|-----------|------|
+| **Prefill-420** | **0.122 ms** | 0.127 ms | 0.229 ms | 0.256 ms | 0.476 ms |
+| **Prefill-488** | **0.121 ms** | 0.137 ms | 0.220 ms | 0.249 ms | 0.549 ms |
+| **Postfix-32** | **0.095 ms** | 0.112 ms | 0.233 ms | 0.244 ms | 0.250 ms |
+| **Decode-1** | **0.095 ms** | 0.112 ms | 0.258 ms | 0.244 ms | 0.246 ms |
+
+### vs Math 加速比
+
+| Config | MemEff SDPA | cuDNN SDPA | FA2 CUDA | Triton FA |
+|--------|------------|------------|----------|-----------|
+| **Prefill-420** | **3.9x** | 3.7x | 2.1x | 1.9x |
+| **Prefill-488** | **4.5x** | 4.0x | 2.5x | 2.2x |
+| **Postfix-32** | **2.6x** | 2.2x | 1.1x | 1.0x |
+| **Decode-1** | **2.6x** | 2.2x | 0.95x | 1.0x |
+
+### 关键发现
+
+**1. MemEff SDPA（xformers）在 Orin 上全面最快。**
+
+在所有 4 个配置下，`mem_efficient` backend 均优于 cuDNN SDPA。两者都是 fused attention（不具现化 O(N²) attention matrix），但 MemEff 基于 CUTLASS 的实现在 wall-x 的短序列 GQA 配置下调度更好。
+
+**2. FA2 CUDA 和 Triton FA 在短序列下不如 SDPA。**
+
+FlashAttention 的核心优化是 IO-aware tiling——在长序列（2K+）下减少 HBM 带宽。但 wall-x 的序列只有 420-488 tokens，tiling 的 overhead（tile 调度、寄存器压力）反而大于收益。FA2 在 Decode-1 甚至**慢于朴素 Math**（0.258 vs 0.246 ms）。
+
+**3. 正确隔离 SDPA backend 至关重要。**
+
+PyTorch 2.5 的 `sdp_kernel()` context manager 只控制 flash/math/mem_efficient 三个开关，**cuDNN 是独立的第4个 backend**。如果不显式调用 `enable_cudnn_sdp(False)`，即使设置 `enable_math=True`，cuDNN 仍然会偷偷生效——导致你以为在测 Math，实际测的是 cuDNN。
+
+```python
+# ❌ 错误：cuDNN 仍然开着，不是真正的 Math-only
+with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False):
+    F.scaled_dot_product_attention(q, k, v)
+
+# ✅ 正确：显式关闭 cuDNN
+torch.backends.cuda.enable_cudnn_sdp(False)
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
+F.scaled_dot_product_attention(q, k, v)
+```
+
+**4. C++ 引擎已经在用最优 backend。**
+
+我们的 C++ 推理引擎调用 `torch::scaled_dot_product_attention` 时不传 `attention_mask`，PyTorch 自动选择最优 backend（MemEff 或 cuDNN）。**不需要换成 FA2——SDPA 在 Orin 短序列场景下就是最优解。**
+
+> 数据来源：`scripts/bench_fa_all.py`，Triton 3.6.0，flash-attn v2.8.3，PyTorch 2.5.0a0，Orin 64GB 锁频。GQA 场景：FA2 原生支持 GQA（nheads_q≠nheads_kv），Triton FA 和 SDPA 需要手动展开 KV heads（4→16）。
 
 ---
 
