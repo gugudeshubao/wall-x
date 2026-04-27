@@ -1,5 +1,6 @@
 #pragma once
 #include <torch/torch.h>
+#include "int8_linear.h"
 #include "utils.h"
 
 // Forward declarations for CUDA ops from csrc/
@@ -22,9 +23,7 @@ public:
     torch::Tensor forward(const torch::Tensor& x);
 
 private:
-    torch::Tensor gate_proj_weight_, gate_proj_bias_;
-    torch::Tensor up_proj_weight_, up_proj_bias_;
-    torch::Tensor down_proj_weight_, down_proj_bias_;
+    LinearOp gate_proj_, up_proj_, down_proj_;
 };
 
 // ViT attention (SDPA variant)
@@ -39,8 +38,8 @@ public:
                           const torch::Tensor& sin);
 
 private:
-    torch::Tensor qkv_weight_, qkv_bias_;
-    torch::Tensor proj_weight_, proj_bias_;
+    LinearOp qkv_;
+    LinearOp proj_;
     int num_heads_ = 0;
     int head_dim_ = 0;
 };
@@ -74,8 +73,8 @@ public:
 
 private:
     torch::Tensor ln_q_weight_;
-    torch::Tensor mlp_0_weight_, mlp_0_bias_;  // Linear 1
-    torch::Tensor mlp_2_weight_, mlp_2_bias_;  // Linear 2
+    LinearOp mlp_0_;  // Linear 1
+    LinearOp mlp_2_;  // Linear 2
     int hidden_size_ = 0;  // context_dim * spatial_merge_size^2
     float eps_ = 1e-6f;
 };

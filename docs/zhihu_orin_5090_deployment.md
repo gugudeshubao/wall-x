@@ -3,7 +3,7 @@
 > 本文记录了将一个 3B 参数量的机器人视觉-语言-动作（VLA）大模型 wall-x 分别部署到 NVIDIA RTX 5090 和 Jetson AGX Orin 上的完整过程，包含大量真实踩坑经历和性能对比数据。如果你也在做端侧/边缘侧的大模型部署，希望这篇文章能帮你少走一些弯路。
 
 **TL;DR**
-- RTX 5090 动作预测 **14ms（70Hz）**，Orin **115ms（8.7Hz）**，端到端差距 **8 倍**
+- RTX 5090 VQA 推理 **1,747ms（59.8 tok/s）**，Orin **13,898ms（7.5 tok/s）**，端到端差距 **8 倍**
 - Nsight Systems 抓了 **28 万+ kernel**，GPU 纯算时间差距其实是 **13.2 倍**，差值被 CPU/Python 开销吃掉了
 - **GEMM/GEMV 占 54-69% GPU 时间**，是推理延迟的绝对主体；量化可以直接砍一半以上
 - Orin 上 SDPA 的 Softmax 没有融合，独立 kernel 比 5090 **慢 57 倍**（746ms vs 13ms）——最大单点优化机会
@@ -148,7 +148,7 @@ Output shape: [1, 50, 153715] ✓
 NaN: False ✓
 Inf: False ✓
 Peak VRAM: ~15.7 GB
-单次推理延迟: 14.2 ms
+单次推理延迟: 14.2 ms（注：50 token 随机 tensor 的单次 forward，非完整动作预测流水线）
 ```
 
 ---
@@ -341,7 +341,7 @@ Peak GPU mem: ~15.7 GB (共享内存)
 
 ---
 
-## 五、性能对比：RTX 5090 vs Jetson AGX Orin
+## 五、VQA 性能对比：RTX 5090 vs Jetson AGX Orin
 
 在两个平台上使用完全相同的测试条件进行对比。
 
@@ -354,6 +354,10 @@ Peak GPU mem: ~15.7 GB (共享内存)
 - 精度：**bfloat16**（两个平台一致，均使用 Tensor Core 加速 bf16 矩阵运算）
 - Attention：RTX 5090 使用 Flash Attention 2.8.3，Orin 使用 SDPA
 - 推理方式：`model.generate()`，max_new_tokens=128
+  - 128 不是模型限制（Qwen2.5 上下文窗口为 32K+），而是为了给 VQA 回答设一个合理的输出长度上限
+  - 机器人场景的 VQA 回答通常是 1-3 句话（50-150 token），128 能覆盖大部分回答而不会过长
+  - 实测大部分用例刚好生成满 128 token（达到上限被截断），少数短回答提前遇到 EOS 停止
+  - 第二篇改为 64 tokens（`--max_new_tokens 64`），更贴近真实场景的短回答长度
 - 预热：1 次
 - 重复：每个测试 3 次取平均
 - 计时：使用 `torch.cuda.synchronize()` + `time.perf_counter()` 精确计时
@@ -365,6 +369,8 @@ Peak GPU mem: ~15.7 GB (共享内存)
 - Q3: "What action should the robot take?"
 
 ### 5.1 Fake Inference 延迟（纯前向推理，随机 tensor 输入）
+
+> ⚠️ **重要说明**：这组数据使用 `fake_inference.py`，输入是 **50 个随机 token**，调用 `model()` 单次 forward（mode="validate"）。它**没有图片输入**（跳过 ViT ~225ms）、**没有 ODE 积分**（跳过 Flow Action ~133ms）、**没有 autoregressive 文本生成**。因此 14.2ms **不代表真实的动作预测延迟或 VQA 延迟**，仅反映 50 token 过一遍 Transformer 的耗时。真实 Flow Action 端到端延迟见第四篇（C++ 推理 Orin 上 ~557ms）。
 
 | 指标 | RTX 5090 | Jetson AGX Orin | 倍数差 |
 |------|----------|----------------|--------|
@@ -410,6 +416,8 @@ Peak GPU mem: ~15.7 GB (共享内存)
 
 两个平台的峰值显存占用完全一致（15.74 GB），这说明模型本身的 bf16 参数和 KV Cache 内存开销是固定的，与硬件无关。
 
+> ⚠️ 这个 15.74 GB 偏高——原因是测试脚本用了 `.to("cuda").bfloat16()` 链式调用，fp32 权重先完整上了 GPU（~12.4 GB），再原地转 bf16。如果用 `.to("cuda", dtype=torch.bfloat16)` 一步加载，峰值只有 ~8.1 GB。第一篇写作时没有关注这个细节，第二篇已修正加载方式并给出了详细公式对比。
+
 ### 5.5 Attention 机制与 Tensor Core 使用
 
 | 项目 | RTX 5090 | Jetson AGX Orin |
@@ -439,9 +447,7 @@ Peak GPU mem: ~15.7 GB (共享内存)
 
 对于机器人控制来说，VQA 推理（128 token 文本生成）通常不在实时控制回路中使用。它更多用于场景理解和任务规划，13.9 秒是可以接受的。
 
-真正需要低延迟的是 **动作预测（Action Prediction）**，即 Fake Inference 测试的场景：
-- RTX 5090: 14.2 ms → **70 Hz** 控制频率
-- Orin: 115.1 ms → **8.7 Hz** 控制频率
+真正需要低延迟的是 **动作预测（Flow Action）**。本文的 Fake Inference 测试只是 50 token Transformer forward 的冒烟测试，**不包含 ViT 编码和 ODE 积分**，不能作为动作预测延迟的参考。完整的 Flow Action 端到端基准见第四篇（C++ + INT8 优化后，Orin 上 ~557ms）。
 
 8.7 Hz 对于大多数非高速操控任务（抓取、搬运、桌面操作）是够用的。如果需要更高频率，可以考虑：
 - **FP8 量化**（5090 的 Blackwell 原生支持，理论 ~2x 加速）
@@ -594,7 +600,7 @@ Jetson AGX Orin：
 
 在 2026 年的今天，把一个 3B VLA 模型同时部署到最新的桌面 GPU 和边缘端 Jetson 上，仍然需要处理不少兼容性问题。
 
-RTX 5090 的 14ms 动作预测延迟让人兴奋——这意味着 70Hz 的控制频率，完全可以做精细操控。VQA 场景下 59.8 tok/s 的生成速度也非常流畅。而 Orin 虽然慢了 8 倍（动作预测 115ms，VQA 生成 7.5 tok/s），但对于大多数机器人任务来说已经够用，而且它只有巴掌大小，可以直接装在机器人身上。
+RTX 5090 的 VQA 推理 59.8 tok/s（平均 1.7 秒完成 128 token 生成），交互体验已经非常流畅。而 Orin 虽然慢了 8 倍（VQA 生成 7.5 tok/s，平均 13.9 秒），但它只有巴掌大小，可以直接装在机器人身上。对于需要低延迟的动作预测（Flow Action），第四篇在 C++ + INT8 优化后，Orin 上实测 ~557ms 端到端延迟。
 
 **Nsight Systems profiling 让差距有了更具体的解释。** 两个平台跑的 28 万+ kernel 实例几乎完全对应，但 GPU kernel 总时间比达到 13.2x。其中 GEMM/GEMV（线性投影）独占 54-69% 的 GPU 时间，是推理延迟的绝对主体。Orin 上还存在 Softmax 未融合的问题（独立 kernel 耗时 746ms，比 5090 慢 57 倍），这是一个明确的可优化点。
 

@@ -181,7 +181,7 @@ Batch=1, seqlen=256, 8 heads, headdim=128, fp16。
 
 ---
 
-## 五、Benchmark：期望 vs 现实
+## 五、VQA Benchmark：期望 vs 现实
 
 功能验证通过，接下来是正题——把 FA2 插回 wall-x 推理流程，和 SDPA 做正式对比。
 
@@ -189,13 +189,13 @@ Batch=1, seqlen=256, 8 heads, headdim=128, fp16。
 
 写了一个 benchmark 脚本 `bench_fa2_vs_sdpa.py`，做法是：
 1. 加载 wall-x 模型（`wall-oss-flow` 3B），指定 `attn_implementation = "sdpa"` 或 `"flash_attention_2"`
-2. 用同一张 640×480 测试图片 + VQA（Visual Question Answering，视觉问答：给模型一张图片和一个文字问题，模型生成文字回答） prompt，生成 64 个 token
+2. 用同一张 640×480 测试图片 + VQA（Visual Question Answering，视觉问答：给模型一张图片和一个文字问题，模型生成文字回答） prompt，生成 64 个 token（`--max_new_tokens 64`，比第一篇的 128 更短，更贴近机器人场景下的短回答长度；这是脚本参数，不是模型限制）
 3. 3 次 warmup + 10 次正式计时
 4. **系统空闲**（load avg < 5）、`jetson_clocks` 锁定 GPU 频率到最大值 1300.5 MHz
 
 关键细节：模型加载时通过直接设置 `model_config._attn_implementation` 来切换 attention 后端，确保除了 attention 实现之外，其他所有条件完全一致。
 
-### 结果：FA2 比 SDPA 快 27%
+### 结果：FA2 比 SDPA 快 27%（VQA 文本生成）
 
 | 指标 | SDPA | Flash Attention 2 | 差异 |
 |------|------|-------------------|------|
@@ -210,9 +210,9 @@ FA2 在每一个维度上都优于 SDPA：延迟低 27%、吞吐量高 36.5%、�
 
 > **Orin 上怎么看 GPU 内存？** Jetson 是统一内存架构，`nvidia-smi` 不可用。推荐用 [`jtop`](https://github.com/rbonghi/jetson_stats)（`pip install jetson-stats`，然后终端运行 `jtop`），可以实时看到 GPU/CPU 占用率、内存分配、功耗、温度等信息。上表的"峰值 GPU 内存"通过 `torch.cuda.max_memory_allocated()` 采集，`jtop` 则适合在推理过程中做实时监控和截图。
 
-### 跨平台对比：FA2 让 Orin 追近了 5090
+### 跨平台 VQA 对比：FA2 让 Orin 追近了 5090
 
-上一篇文章中，我们在 **5090 用 FA2、Orin 用 SDPA** 做了对比。现在 Orin 也有了 FA2，可以做一个完整的三路对比：
+上一篇文章中，我们在 **5090 用 FA2、Orin 用 SDPA** 做了 VQA 对比。现在 Orin 也有了 FA2，可以做一个完整的三路对比：
 
 | 平台 | Attention | VQA 延迟 | tok/s | 峰值显存 | vs 5090 差距 |
 |------|-----------|----------|-------|---------|-------------|
@@ -221,6 +221,38 @@ FA2 在每一个维度上都优于 SDPA：延迟低 27%、吞吐量高 36.5%、�
 | **Orin + FA2** | FA2 2.8.3 | **6,360 ms**<sup>②</sup> | **10.1** | 8.14 GB | ~5.9x |
 
 <small>① 128 tokens，8 图平均（第一篇数据）。② 64 tokens，单图（本篇数据）。两平台 token 数不同，延迟不可直接比较，"vs 5090 差距"按 tok/s 计算（tok/s 与生成长度无关，是更准确的吞吐度量）。峰值显存统一按单图 64 tokens 条件采集（`torch.cuda.max_memory_allocated()`），三个平台一致。</small>
+
+> **为什么第一篇报 15.7 GB，本篇只有 8.1 GB？**
+>
+> 差异来自模型加载方式，不是模型本身变了。wall-x 3B 模型共 ~3.1B 参数：
+>
+> ```
+> 模型权重内存 = 参数量 × 每参数字节数
+>   fp32:  3.1B × 4 bytes = ~12.4 GB
+>   bf16:  3.1B × 2 bytes = ~6.2 GB
+> ```
+>
+> 第一篇 `test_vqa_bench.py` 的写法：
+> ```python
+> model = from_pretrained(model_path)       # ① 默认 fp32 加载到 CPU
+> model.eval().to("cuda").bfloat16()        # ② .to("cuda") 先把 fp32 搬上 GPU → 峰值 ~12.4 GB
+>                                            # ③ .bfloat16() 再原地转 bf16 → 降为 ~6.2 GB
+>                                            # 但 max_memory_allocated 已记录 ② 的 12.4 GB 峰值
+> ```
+>
+> 本篇 `bench_fa2_vs_sdpa.py` 的写法：
+> ```python
+> model.eval().to(device, dtype=torch.bfloat16)  # 一步完成：fp32→bf16 转换 + CPU→GPU 搬运
+>                                                  # GPU 上从头到尾只有 bf16 → 峰值 ~6.2 GB
+> ```
+>
+> | | 第一篇 | 本篇（第二篇） |
+> |---|---|---|
+> | GPU 上权重峰值 | ~12.4 GB（fp32 先上 GPU） | ~6.2 GB（bf16 直接上 GPU） |
+> | + 推理激活值 | ~3.3 GB | ~1.9 GB |
+> | **`max_memory_allocated`** | **~15.7 GB** | **~8.1 GB** |
+>
+> **教训**：PyTorch 中 `.to("cuda").bfloat16()` 和 `.to("cuda", dtype=torch.bfloat16)` 的内存峰值差 2×。部署时永远用后者。
 
 关键数字：
 
@@ -471,6 +503,8 @@ generate(N) = 216.2 + 97.2 * N  （线性回归）
   总计:                   6434.0 ms
 ```
 
+> ⚠️ **216.2ms 的来源**：这不是直接测量值，而是 `profile_overhead.py` 在 N=[1, 4, 16, 64] 四个生成长度上运行 `model.generate()`（每个跑 3 次取平均）后，用 `numpy.polyfit` 拟合的线性回归截距。截距代表 N=0 时的外推值，即 ViT 编码 + Prefill + 框架初始化的总开销。216.2ms 看起来很小，但和 nsys 数据一致：nsys 显示全推理 GPU kernel 总时间 2101ms，其中 decode 约 1900ms，因此 ViT + Prefill 的 GPU kernel 时间约 201ms。ViT 和 Prefill 阶段是大批量矩阵运算（256+ tokens 过 36 层 Transformer），GPU 利用率接近 100%，所以 wall clock（216.2ms）≈ GPU kernel 时间（201ms）+ 很小的 CPU 开销。这和 decode 阶段形成鲜明对比——decode 每步 97.2ms wall clock 但 GPU 只算 29.7ms，利用率仅 30.6%。
+
 每个 decode step 97.2ms，但 nsys 数据显示 64 步 decode 的 GPU kernel 总时间约 1900ms → **每步 GPU 只计算 29.7ms**：
 
 ```
@@ -488,7 +522,7 @@ generate(N) = 216.2 + 97.2 * N  （线性回归）
 - 动态 KV cache 内存管理
 - Python GIL 和垃圾回收
 
-64 步 decode 总共浪费了 **~4320ms 在框架开销上** —— 这比 GEMM 全部时间（1643ms）都多。换句话说，**优化 GEMM 计算本身最多省 1643ms；消除框架开销可以省 4320ms。**
+64 步 decode 总共浪费了 **~4320ms 在框架开销上**（67.5ms/step × 64 steps = 4320ms） —— 这比 GEMM 全部时间（1643ms）都多。换句话说，**优化 GEMM 计算本身最多省 1643ms；消除框架开销可以省 4320ms。**
 
 ### FA2 未来的优化空间
 

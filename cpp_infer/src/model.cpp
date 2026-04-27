@@ -364,3 +364,125 @@ WallXModel::GenerateResult WallXModel::generate_flow_action(
 
     return result;
 }
+
+// ===================== Generate Text (VQA) =====================
+
+WallXModel::TextGenerateResult WallXModel::generate_text(
+    const torch::Tensor& input_ids,
+    const torch::Tensor& pixel_values,
+    const torch::Tensor& image_grid_thw,
+    int max_new_tokens,
+    bool greedy) {
+
+    TextGenerateResult result;
+    CudaTimer total_timer, step_timer;
+    total_timer.start();
+
+    int batch_size = input_ids.size(0);
+    int seq_len = input_ids.size(1);
+    auto device = input_ids.device();
+
+    // --- 1. Token Embedding ---
+    auto inputs_embeds = torch::embedding(embed_tokens_, input_ids);
+
+    // --- 2. Vision Encoding ---
+    step_timer.start();
+    if (pixel_values.defined()) {
+        auto image_embeds = vision_.forward(pixel_values, image_grid_thw);
+        auto image_mask = (input_ids == config_.image_token_id);
+        auto mask_expanded = image_mask.unsqueeze(-1).expand_as(inputs_embeds);
+        inputs_embeds = inputs_embeds.masked_scatter(mask_expanded, image_embeds.to(inputs_embeds.dtype()));
+    }
+    result.vit_ms = step_timer.elapsed_ms();
+
+    // --- 3. Position IDs (3D RoPE) ---
+    auto [position_ids, rope_deltas] = get_rope_index(
+        input_ids, image_grid_thw,
+        /*video_grid_thw=*/torch::optional<torch::Tensor>(),
+        /*second_per_grid_ts=*/torch::optional<torch::Tensor>(),
+        /*attention_mask=*/torch::optional<torch::Tensor>(),
+        config_.vision_spatial_merge_size,
+        config_.image_token_id,
+        /*video_token_id=*/config_.image_token_id + 1,
+        config_.vision_start_token_id,
+        /*tokens_per_second=*/1.0f);
+
+    // --- 4. MoE token types: all type 0 (text/vision), no action tokens ---
+    TokenTypeInfo token_types;
+    auto moe_types = torch::zeros({1, seq_len}, torch::TensorOptions().dtype(torch::kLong).device(device));
+    token_types.token_types = moe_types.reshape({-1});
+    token_types.num_tokens_per_expert[0] = seq_len;
+    for (int i = 1; i < config_.num_experts; i++) {
+        token_types.num_tokens_per_expert[i] = 0;
+    }
+
+    // --- 5. Allocate KV cache ---
+    kv_cache_.allocate(config_.num_hidden_layers, batch_size, seq_len + max_new_tokens,
+                        config_.num_key_value_heads, config_.head_dim, device);
+
+    // --- 6. Prefill forward ---
+    step_timer.start();
+    auto hidden_states = transformer_forward(inputs_embeds, position_ids, token_types,
+                                              /*use_cache=*/true, /*is_causal=*/true);
+
+    // Apply lm_head to get logits for the last position
+    auto last_hidden = hidden_states.index({0, -1});  // [hidden_size]
+    auto logits = torch::matmul(last_hidden, lm_head_weight_.t());  // [vocab_size]
+    auto next_token = logits.argmax().item<int64_t>();
+    result.prefill_ms = step_timer.elapsed_ms();
+
+    // --- 7. Decode loop ---
+    step_timer.start();
+
+    // Track generated tokens
+    std::vector<int64_t> generated;
+    generated.push_back(next_token);
+
+    // Compute next position: max position from prefill + 1
+    // For text tokens in multimodal RoPE, all 3 dims have the same position
+    int64_t current_pos = position_ids.max().item<int64_t>() + 1;
+
+    // Decode token type info (single text token per step)
+    TokenTypeInfo decode_token_types;
+    auto single_type = torch::zeros({1}, torch::TensorOptions().dtype(torch::kLong).device(device));
+    decode_token_types.token_types = single_type;
+    decode_token_types.num_tokens_per_expert[0] = 1;
+    for (int i = 1; i < config_.num_experts; i++) {
+        decode_token_types.num_tokens_per_expert[i] = 0;
+    }
+
+    for (int step = 1; step < max_new_tokens; step++) {
+        // Check EOS
+        if (next_token == config_.eos_token_id) break;
+
+        // Embed new token: [1, 1, hidden_size]
+        auto token_id = torch::tensor({{next_token}}, torch::TensorOptions().dtype(torch::kLong).device(device));
+        auto token_embed = torch::embedding(embed_tokens_, token_id);
+
+        // Position IDs for decode: [3, 1, 1], all dims = current_pos
+        auto decode_pos = torch::full({3, 1, 1}, current_pos, torch::TensorOptions().dtype(torch::kLong).device(device));
+
+        // Forward through transformer (use_cache=true advances KV cache)
+        auto decode_hidden = transformer_forward(token_embed, decode_pos, decode_token_types,
+                                                   /*use_cache=*/true, /*is_causal=*/false);
+
+        // Apply lm_head
+        auto step_logits = torch::matmul(decode_hidden.index({0, 0}), lm_head_weight_.t());
+        next_token = step_logits.argmax().item<int64_t>();
+
+        generated.push_back(next_token);
+        current_pos++;
+    }
+
+    result.decode_ms = step_timer.elapsed_ms();
+
+    // --- 8. Package results ---
+    result.num_tokens = static_cast<int>(generated.size());
+    result.generated_ids = torch::tensor(generated, torch::TensorOptions().dtype(torch::kLong));
+    result.total_ms = total_timer.elapsed_ms();
+
+    // Reset KV cache for next inference
+    kv_cache_.reset();
+
+    return result;
+}

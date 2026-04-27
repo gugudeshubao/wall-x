@@ -38,18 +38,26 @@ void VisionMLP::load_weights(const WeightMap& weights, const std::string& prefix
         if (it == weights.end()) throw std::runtime_error("Weight not found: " + prefix + name);
         return it->second;
     };
-    gate_proj_weight_ = get("mlp.gate_proj.weight");
-    gate_proj_bias_ = get("mlp.gate_proj.bias");
-    up_proj_weight_ = get("mlp.up_proj.weight");
-    up_proj_bias_ = get("mlp.up_proj.bias");
-    down_proj_weight_ = get("mlp.down_proj.weight");
-    down_proj_bias_ = get("mlp.down_proj.bias");
+    auto try_get = [&](const std::string& name) -> torch::Tensor {
+        auto it = weights.find(prefix + name);
+        return (it != weights.end()) ? it->second : torch::Tensor();
+    };
+
+    auto load_proj = [&](LinearOp& op, const std::string& name) {
+        op.load(get(name + ".weight"),
+                try_get(name + ".weight_scale"),
+                try_get(name + ".bias"));
+    };
+
+    load_proj(gate_proj_, "mlp.gate_proj");
+    load_proj(up_proj_, "mlp.up_proj");
+    load_proj(down_proj_, "mlp.down_proj");
 }
 
 torch::Tensor VisionMLP::forward(const torch::Tensor& x) {
-    auto gate = torch::linear(x, gate_proj_weight_, gate_proj_bias_);
-    auto up = torch::linear(x, up_proj_weight_, up_proj_bias_);
-    return torch::linear(torch::silu(gate) * up, down_proj_weight_, down_proj_bias_);
+    auto gate = gate_proj_.forward(x);
+    auto up = up_proj_.forward(x);
+    return down_proj_.forward(torch::silu(gate) * up);
 }
 
 // ===================== VisionAttention =====================
@@ -65,10 +73,17 @@ void VisionAttention::load_weights(const WeightMap& weights, const std::string& 
         if (it == weights.end()) throw std::runtime_error("Weight not found: " + prefix + name);
         return it->second;
     };
-    qkv_weight_ = get("attn.qkv.weight");
-    qkv_bias_ = get("attn.qkv.bias");
-    proj_weight_ = get("attn.proj.weight");
-    proj_bias_ = get("attn.proj.bias");
+    auto try_get = [&](const std::string& name) -> torch::Tensor {
+        auto it = weights.find(prefix + name);
+        return (it != weights.end()) ? it->second : torch::Tensor();
+    };
+
+    qkv_.load(get("attn.qkv.weight"),
+              try_get("attn.qkv.weight_scale"),
+              try_get("attn.qkv.bias"));
+    proj_.load(get("attn.proj.weight"),
+               try_get("attn.proj.weight_scale"),
+               try_get("attn.proj.bias"));
 }
 
 torch::Tensor VisionAttention::forward(const torch::Tensor& x,
@@ -79,7 +94,7 @@ torch::Tensor VisionAttention::forward(const torch::Tensor& x,
     int seq_length = x.size(0);
 
     // QKV projection: [seq, dim] -> [seq, 3*dim]
-    auto qkv = torch::linear(x, qkv_weight_, qkv_bias_);
+    auto qkv = qkv_.forward(x);
     // Reshape: [seq, 3, num_heads, head_dim]
     qkv = qkv.reshape({seq_length, 3, num_heads_, head_dim_});
     // Permute: [3, seq, num_heads, head_dim] and unbind
@@ -115,7 +130,7 @@ torch::Tensor VisionAttention::forward(const torch::Tensor& x,
 
     // Reshape back: [num_heads, seq, head_dim] -> [seq, dim]
     attn_output = attn_output.transpose(0, 1).reshape({seq_length, -1});
-    return torch::linear(attn_output, proj_weight_, proj_bias_);
+    return proj_.forward(attn_output);
 }
 
 // ===================== VisionBlock =====================
@@ -165,11 +180,18 @@ void PatchMerger::load_weights(const WeightMap& weights, const std::string& pref
         if (it == weights.end()) throw std::runtime_error("Weight not found: " + prefix + name);
         return it->second;
     };
+    auto try_get = [&](const std::string& name) -> torch::Tensor {
+        auto it = weights.find(prefix + name);
+        return (it != weights.end()) ? it->second : torch::Tensor();
+    };
+
     ln_q_weight_ = get("merger.ln_q.weight");
-    mlp_0_weight_ = get("merger.mlp.0.weight");
-    mlp_0_bias_ = get("merger.mlp.0.bias");
-    mlp_2_weight_ = get("merger.mlp.2.weight");
-    mlp_2_bias_ = get("merger.mlp.2.bias");
+    mlp_0_.load(get("merger.mlp.0.weight"),
+                try_get("merger.mlp.0.weight_scale"),
+                try_get("merger.mlp.0.bias"));
+    mlp_2_.load(get("merger.mlp.2.weight"),
+                try_get("merger.mlp.2.weight_scale"),
+                try_get("merger.mlp.2.bias"));
 }
 
 torch::Tensor PatchMerger::forward(const torch::Tensor& x) {
@@ -177,9 +199,9 @@ torch::Tensor PatchMerger::forward(const torch::Tensor& x) {
     // Apply layer norm, reshape for spatial merge, then MLP
     auto normed = vision_rms_norm(x, ln_q_weight_, eps_);
     auto merged = normed.view({-1, hidden_size_});
-    auto h = torch::linear(merged, mlp_0_weight_, mlp_0_bias_);
+    auto h = mlp_0_.forward(merged);
     h = torch::gelu(h, "tanh");
-    return torch::linear(h, mlp_2_weight_, mlp_2_bias_);
+    return mlp_2_.forward(h);
 }
 
 // ===================== VisionEncoder =====================

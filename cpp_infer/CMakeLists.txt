@@ -116,13 +116,16 @@ target_include_directories(wallx_infer PRIVATE
     ${CUTLASS_INCLUDE}
     ${TORCH_INCLUDE_DIRS}
     ${CUDNN_INCLUDE_DIR}
+    ${Python3_INCLUDE_DIRS}
 )
 target_link_libraries(wallx_infer PRIVATE
     wallx_cuda_ops
+    int8_fused_ops
     ${TORCH_LIBRARIES}
     CUDA::cudart
     CUDA::cuda_driver  # For cubin loading (cuModuleLoad, etc.)
     CUDA::cublas
+    CUDA::cublasLt
     ${CUDNN_LIBRARY}
 )
 target_compile_options(wallx_infer PRIVATE
@@ -130,6 +133,41 @@ target_compile_options(wallx_infer PRIVATE
 )
 target_compile_definitions(wallx_infer PRIVATE
     KERNELS_DIR="${KERNELS_DIR}"
+)
+
+# --- Fused INT8 CUDA kernels (for optimized W8A8 quantization) ---
+add_library(int8_fused_ops STATIC src/int8_kernels.cu src/cutlass_int8_gemm.cu)
+target_include_directories(int8_fused_ops PUBLIC
+    src/
+    ${TORCH_INCLUDE_DIRS}
+    ${CUTLASS_INCLUDE}
+)
+target_compile_options(int8_fused_ops PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>
+)
+target_link_libraries(int8_fused_ops PUBLIC
+    ${TORCH_LIBRARIES}
+    CUDA::cudart
+    CUDA::cublas
+    CUDA::cublasLt
+)
+set_target_properties(int8_fused_ops PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE ON
+)
+
+# --- INT8 micro-benchmark ---
+add_executable(bench_int8 bench_int8.cpp)
+target_include_directories(bench_int8 PRIVATE
+    src/
+    ${TORCH_INCLUDE_DIRS}
+)
+target_link_libraries(bench_int8 PRIVATE
+    int8_fused_ops
+    ${TORCH_LIBRARIES}
+    CUDA::cudart
+    CUDA::cublas
+    CUDA::cublasLt
 )
 
 # --- Print build info ---

@@ -57,6 +57,24 @@ public:
         const std::string& dataset_name,
         int num_inference_timesteps = 5);
 
+    // Generate text (VQA inference entry point)
+    // Returns: generated token IDs and timing
+    struct TextGenerateResult {
+        torch::Tensor generated_ids;  // [num_tokens] generated token IDs
+        int num_tokens = 0;           // actual tokens generated (may < max if EOS hit)
+        float total_ms = 0;
+        float vit_ms = 0;
+        float prefill_ms = 0;
+        float decode_ms = 0;
+    };
+
+    TextGenerateResult generate_text(
+        const torch::Tensor& input_ids,        // [batch, seq_len]
+        const torch::Tensor& pixel_values,      // raw pixel data
+        const torch::Tensor& image_grid_thw,    // [num_images, 3]
+        int max_new_tokens = 64,
+        bool greedy = true);
+
 private:
     ModelConfig config_;
 

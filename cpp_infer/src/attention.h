@@ -1,5 +1,6 @@
 #pragma once
 #include <torch/torch.h>
+#include "int8_linear.h"
 #include "kv_cache.h"
 #include "triton_loader.h"
 #include "utils.h"
@@ -31,11 +32,10 @@ public:
                           bool is_causal = true);
 
 private:
-    torch::Tensor q_proj_weight_;  // [num_heads * head_dim, hidden_size]
-    torch::Tensor k_proj_weight_;  // [num_kv_heads * head_dim, hidden_size]
-    torch::Tensor v_proj_weight_;  // [num_kv_heads * head_dim, hidden_size]
-    torch::Tensor o_proj_weight_;  // [hidden_size, num_heads * head_dim]
-    torch::Tensor q_proj_bias_, k_proj_bias_, v_proj_bias_;  // optional biases
+    LinearOp q_proj_;  // [num_heads * head_dim, hidden_size]
+    LinearOp k_proj_;  // [num_kv_heads * head_dim, hidden_size]
+    LinearOp v_proj_;  // [num_kv_heads * head_dim, hidden_size]
+    LinearOp o_proj_;  // [hidden_size, num_heads * head_dim]
 
     int num_heads_ = 0;
     int num_kv_heads_ = 0;

@@ -1,17 +1,17 @@
-# INT8 量化落地：在 Orin 上把 wall-x 的 GEMM 砍一半
+# INT8 量化实战：从理论 2× 加速到 Amdahl 定律的铁壁
 
-> 前三篇我们完成了：环境部署（第一篇）、Flash Attention 深挖（第二篇）、C++ 推理框架设计（第三篇）。到现在为止，所有优化都没动过模型精度——bf16 GEMM 仍然占 GPU 时间的 54-69%，是推理延迟的绝对主体。这一篇终于要动刀了：**把 bf16 GEMM 变成 INT8 GEMM，理论上直接砍一半计算量。**
+> 前三篇我们完成了：环境部署（第一篇）、Flash Attention 深挖（第二篇）、C++ 推理框架（第三篇，557ms）。这一篇终于要动刀了：**把 bf16 GEMM 变成 INT8 GEMM，理论上直接砍一半计算量。** 但实战的结果出乎意料——朴素 INT8 反而慢了 1.6 倍，用 CUTLASS 融合方案修正后 GEMM 快了 1.5 倍，端到端却只从 557ms 降到 554ms。这篇完整记录三条技术路线的探索、CUTLASS EVT 的实现细节、nsys profiling 的深度分析，以及 Amdahl 定律给出的残酷答案。
 
 **TL;DR**
 - wall-x 3B 模型有 **~723 个 Linear 层**（36 层 decoder × 7 + 32 层 ViT × 5 + 杂项），GEMM 是绝对主体
-- **不需要把整个模型展开为静态图**——逐模块替换 Linear 层即可，自定义 CUDA 算子不受影响
-- 量化框架选择：**PyTorch 原生（torchao）> TensorRT > ONNX**，原因是 6 个自定义算子
-- 推荐方法：**SmoothQuant + W8A8 动态量化**——权重静态 INT8，激活逐 token 动态 INT8
-- Orin SM 8.7 有 INT8 Tensor Core，cuBLAS 原生支持 INT8 GEMM，理论吞吐量是 bf16 的 **2 倍**
-- **Flow Action 是量化的最大风险点**：ODE 10 步积分会放大量化误差，Action Head 建议保持 bf16
-- 最大的坑：`asym_dual_gmm` 自定义 CUDA kernel 不支持 INT8，MoE 层暂不量化
-- **C++ 推理和量化可以叠加**：Python 离线量化导出 INT8 权重 + scale，C++ 用 `torch::_int_mm` 推理，完全解耦
-- 校准数据：从 LeRobot 训练集随机抽 256 条，**现有硬件（5090 + Orin）足够做 PTQ**
+- 量化方案：**Per-channel 权重 INT8 + Per-token 动态激活 INT8**，Python 离线量化导出，C++ 在线推理
+- **朴素 INT8 方案反而慢了 1.6 倍**（871ms vs 554ms bf16）——根因：INT32 输出带宽翻倍 + cuBLAS tile 选择不佳
+- **CUTLASS 融合方案彻底解决**：用 EVT（Epilogue Visitor Tree）将 dequant 融合进 GEMM epilogue，INT32 不落地
+- GEMM 微基准测试：CUTLASS INT8 比 bf16 快 **1.43-1.53 倍**（全矩阵尺寸）
+- 端到端结果：INT8 CUTLASS = 554ms，bf16 = 557ms——**持平，没有显著加速**
+- **Amdahl 定律作祟**：量化后 Linear GEMM 仅占 GPU 时间 6.5%，非 GEMM 算子（MoE 28%、逐元素 20%）成为新瓶颈
+- Orin SM 8.7 INT8 Tensor Core 的理论吞吐量是 bf16 的 **2 倍**（MMA 指令 m16n8k32 vs m16n8k16）
+- **下一步优化**：CUDA Graph 消除 3.3 万次 kernel launch 开销、算子融合、MoE INT8 量化
 
 ---
 
@@ -254,22 +254,54 @@ SmoothQuant 变换：
 
 ### 4.4 INT8 GEMM 在 Orin 上怎么跑
 
+**朴素方案**（最初尝试）：
+
 ```
-bf16 GEMM（当前）：
+bf16 GEMM（基线）：
   cuBLAS → cublasGemmEx(CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF)
   使用 bf16 Tensor Core
 
-INT8 GEMM（目标）：
+朴素 INT8 GEMM：
   cuBLAS → cublasLtMatmul(CUDA_R_8I, CUDA_R_8I, CUDA_R_32I)
-  使用 INT8 Tensor Core
-  输出 INT32 → dequant → bf16（和后续层对接）
-
-PyTorch API：
-  torch._int_mm(A_int8, B_int8)  → 返回 INT32 tensor
-  然后手动 dequant：output_bf16 = output_int32 * scale_a * scale_b
+  输出 INT32 → 写回 DRAM → 读回 → dequant → 写回 bf16
+  ❌ 实测比 bf16 慢 1.6 倍（详见第十节）
 ```
 
-PyTorch 2.5 的 `torch._int_mm` 底层调用 cuBLAS INT8 GEMM，直接使用 Orin 的 INT8 Tensor Core。这是一个成熟的 API。
+**实际采用的 CUTLASS 融合方案**：
+
+```
+CUTLASS INT8 GEMM + EVT Epilogue：
+  CUTLASS → GemmWithEpilogueVisitor
+  输入 INT8 → MMA 指令（m16n8k32）→ INT32 累加器
+  → 在寄存器内直接执行 dequant → 输出 bf16
+  ✅ INT32 不落地，节省 2x 带宽
+  ✅ 实测比 bf16 快 1.43-1.53 倍
+```
+
+核心是 CUTLASS 的 **EVT（Epilogue Visitor Tree）** 机制——把 `int32 * act_scale * weight_scale → bf16` 的 dequant 逻辑融合进 GEMM 的 epilogue 阶段，INT32 累加器直接在寄存器中完成类型转换，不经过全局内存。
+
+### 4.5 Orin MMA 指令全景：INT8 天然有 2x 优势
+
+Orin 的 SM 8.7 基于 Ampere 架构。以下是 CUTLASS `mma_sm80.h` 中定义的所有 MMA 指令形状：
+
+| 数据类型 | MMA 形状 | 每条指令运算量 | 相对吞吐量 |
+|---------|----------|-------------|-----------|
+| BF16 | m16n8k8 | 2,048 ops | 0.5× |
+| **BF16** | **m16n8k16** | **4,096 ops** | **1×（基线）** |
+| FP16 | m16n8k16 | 4,096 ops | 1× |
+| **INT8** | m16n8k16 | 4,096 ops | 1× |
+| **INT8** | **m16n8k32** | **8,192 ops** | **2×** |
+| INT4 | m16n8k64 | 16,384 ops | 4× |
+| TF32 | m16n8k4 | 1,024 ops | 0.25× |
+| TF32 | m16n8k8 | 2,048 ops | 0.5× |
+
+**关键结论**：
+- INT8 的 `m16n8k32` 指令每次处理 32 个 K 维元素（bf16 只处理 16 个），**同一条 MMA 指令的运算量翻倍**
+- 这不是"多发几条指令"的假加速，而是**单条指令真正多算一倍**
+- INT4 更极端（m16n8k64，4× 吞吐），但 INT4 Tensor Core 在 Orin 上没有对应的 cuBLAS API，需要纯 CUTLASS 实现
+- FP8 不可用——FP8 Tensor Core 需要 SM 8.9+（Ada Lovelace / Hopper），Orin SM 8.7 没有
+
+**MMA 指令不是瓶颈**。INT8 在硬件层面确实有 2× 吞吐优势。真正的问题出在软件层面（朴素实现的 INT32 带宽、tile 选择），以及 Amdahl 定律（GEMM 只占总时间 25%）。
 
 ---
 
@@ -386,76 +418,130 @@ assert q.dtype == torch.bfloat16, f"q_proj output dtype mismatch: {q.dtype}"
 
 ---
 
-## 七、C++ 推理框架和量化的兼容性
+## 七、C++ 推理框架和量化的实际集成
 
-第三篇的 C++ 替换和第四篇的 INT8 量化要叠加使用。但这里有一个关键兼容性问题：**torchao 的 Python 量化模块在 C++ libtorch 里不存在。**
+第三篇的 C++ 替换和第四篇的 INT8 量化要叠加使用。核心挑战是：**torchao 的 Python 量化模块在 C++ libtorch 里不存在，且朴素 INT8 GEMM 在 Orin 上反而更慢。**
 
-### 7.1 问题
-
-```
-torchao.QuantizedLinear      → Python 类，C++ 里不存在
-torch.ao 的 quantized module → TorchScript 兼容，但老 API
-torch.jit.trace(量化模型)    → 取决于量化方式，可能失败
-```
-
-### 7.2 解决方案：Python 量化 + C++ 推理分离
-
-最干净的做法是把量化和推理完全解耦：
+### 7.1 架构：Python 离线量化 + C++ 在线推理
 
 ```
 阶段 1：Python 离线量化（在 5090 上，跑一次）
   ├── 加载 bf16 模型
-  ├── 跑 SmoothQuant → 计算 smooth scales
-  ├── 跑校准数据 → 计算 per-channel weight scales
-  ├── 权重量化 → bf16 round to INT8
-  └── 保存三个文件：
-      weights_int8.pt      # 所有 Linear 层的 INT8 权重
-      weight_scales.pt     # per-channel scale (float32)
-      smooth_scales.pt     # SmoothQuant 平滑因子 (float32)
+  ├── 逐层计算 per-channel 权重 absmax
+  ├── 权重量化 → round(W / scale * 127) → INT8
+  └── 保存：
+      model.layers.*.self_attn.{q,k,v,o}_proj.{weight_int8, weight_scale}
+      model.layers.*.mlp.{gate,up,down}_proj.{weight_int8, weight_scale}
+      model.visual.blocks.*.{attn, mlp}.*.{weight_int8, weight_scale}
 
 阶段 2：C++ 在线推理（在 Orin 上运行）
-  ├── 加载 INT8 权重 + scales（普通 tensor，不依赖任何量化框架）
-  ├── 对每个 Linear 层：
-  │     input_int8 = 动态量化(input_bf16)
-  │     output_int32 = torch::_int_mm(input_int8, weight_int8)
-  │     output_bf16 = dequant(output_int32, scale_a, scale_w)
+  ├── 加载 INT8 权重 + weight_scale（普通 tensor）
+  ├── 对每个 Linear 层调用 2-kernel 流水线：
+  │     kernel 1: fused_quantize_activation() → act_int8 + act_scale
+  │     kernel 2: cutlass_int8::gemm_dequant() → bf16 输出
   └── 自定义算子（RoPE、MoE permute 等）照常 bf16
 ```
 
-### 7.3 C++ 侧的 INT8 Linear 实现
+### 7.2 三条路线的探索历程
+
+我们实际尝试了三种 INT8 GEMM 实现方式：
+
+**路线 1：朴素方案（torch::_int_mm + 手动 dequant）**
 
 ```cpp
-struct QuantizedLinear {
-    torch::Tensor weight_int8;    // [out, in], int8
-    torch::Tensor weight_scale;   // [out], float32
-    torch::Tensor smooth_scale;   // [in], float32
+// 4 个 kernel：quantize_act + absmax + _int_mm + dequant
+auto x_int8 = quantize(input);
+auto out_int32 = torch::_int_mm(x_int8, weight_int8.t());  // cuBLAS INT8
+auto out_bf16 = dequant(out_int32, act_scale, weight_scale);
+// ❌ 结果：871ms（bf16 = 554ms），慢 1.6 倍
+```
 
-    torch::Tensor forward(torch::Tensor input_bf16) {
-        // 1. SmoothQuant 平滑
-        auto x = input_bf16 / smooth_scale;
-        // 2. 动态量化激活
-        auto abs_max = x.abs().amax(-1, true);
-        auto input_scale = abs_max / 127.0;
-        auto x_int8 = (x / input_scale).round().clamp(-128, 127).to(torch::kInt8);
-        // 3. INT8 GEMM (cuBLAS Tensor Core)
-        auto out_int32 = torch::_int_mm(x_int8, weight_int8.t());
-        // 4. Dequantize
-        return out_int32.to(torch::kBFloat16) * input_scale * weight_scale;
+慢的根因（nsys + ncu 确认）：
+- INT32 输出带宽是 bf16 的 2 倍（4 bytes vs 2 bytes per element）
+- cuBLAS 对 M=32 的 INT8 选了非最优 tile（128×64 而不是 256×128）
+- splitK 策略引入额外 reduce kernel
+
+**路线 2：fused kernels + cublasLt**
+
+```cpp
+// 2 个 kernel：fused_quantize + cublasLtMatmul(INT8→bf16)
+auto [act_int8, act_scale] = int8_fused::quantize_activation(input);
+auto out = CublasLtInt8Gemm::run(act_int8, weight, act_scale, weight_scale);
+// ❌ GEMM 本身仍然比 bf16 慢（cublasLt tile 选择同样不佳）
+```
+
+Fused kernel 效果好（quantize 200us→16us），但 GEMM 部分没解决。
+
+**路线 3：CUTLASS 融合 GEMM + EVT dequant（最终方案）✅**
+
+```cpp
+// 2 个 kernel：fused_quantize + CUTLASS GEMM with fused dequant
+auto [act_int8, act_scale] = int8_fused::quantize_activation(input);
+auto out = cutlass_int8::gemm_dequant(act_int8, weight_int8,
+                                       act_scale, weight_scale);
+// ✅ INT8 GEMM + dequant 融合为一个 kernel，INT32 不落地
+```
+
+### 7.3 CUTLASS EVT 融合 GEMM 的关键实现
+
+用 CUTLASS 4.0 的 `GemmWithEpilogueVisitor` + `Sm80EVT`，把 dequant 逻辑编码为 Epilogue Visitor Tree：
+
+```
+EVT 树结构（寄存器内执行）：
+  StoreD[bf16]
+    └── Mul ← RowBroadcast[weight_scale]     // × per-channel weight scale
+         └── Mul ← ColBroadcast[act_scale]    // × per-token activation scale
+              └── AccFetch                     // INT32 累加器（寄存器）
+```
+
+CUTLASS 的 `VisitorCompute` 自动处理 INT32→float 的类型转换（通过 `NumericArrayConverter`），最终输出 bf16。整个 dequant 流程在 shared memory / registers 中完成，**INT32 累加器从不写回全局内存**。
+
+```cpp
+// 关键类型定义
+using ElementA = int8_t;                    // RowMajor
+using ElementB = int8_t;                    // ColumnMajor
+using ElementAccumulator = int32_t;
+using ElementOutput = cutlass::bfloat16_t;  // RowMajor
+
+// GEMM 配置（为 Orin SM 8.7 调优）
+using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 64>;
+using WarpShape = cutlass::gemm::GemmShape<64, 64, 64>;
+using InstructionShape = cutlass::gemm::GemmShape<16, 8, 32>;  // INT8 MMA
+constexpr int NumStages = 4;  // 4-stage pipeline
+
+// EVT 定义
+using EVT = cutlass::epilogue::threadblock::Sm80EVT<
+    StoreD,           // output bf16
+    MulWeightScale,   // × weight_scale[N]
+    MulActScale,      // × act_scale[M]
+    AccFetch          // INT32 accumulator
+>;
+```
+
+### 7.4 C++ 侧的 INT8 Linear 集成
+
+最终的 `LinearOp` 实现非常干净：
+
+```cpp
+struct LinearOp {
+    torch::Tensor weight_int8_;    // [N, K] int8（原始 layout，CUTLASS ColumnMajor B）
+    torch::Tensor weight_scale_;   // [N] float32
+    torch::Tensor bias_;
+
+    torch::Tensor forward(const torch::Tensor& input) {
+        auto flat = input.reshape({-1, input.size(-1)});
+        // kernel 1: fused quantize（per-token 动态量化）
+        auto [act_int8, act_scale] = int8_fused::quantize_activation(flat);
+        // kernel 2: CUTLASS fused INT8 GEMM + dequant
+        auto out = cutlass_int8::gemm_dequant(
+            act_int8, weight_int8_, act_scale, weight_scale_);
+        if (bias_.defined()) out = out + bias_;
+        return out.reshape(/*restore original shape*/);
     }
 };
 ```
 
-**这段 C++ 完全不依赖任何 Python 量化框架**。它只需要三个 `.pt` 文件（普通 tensor），用 `torch::load()` 加载即可。
-
-### 7.4 为什么这是最佳方案
-
-| 优势 | 说明 |
-|------|------|
-| Python 生态丰富 | 校准、调参、精度验证全在 Python 做 |
-| C++ 侧极简 | 只用 `torch::_int_mm`，一个 API |
-| 完全解耦 | 模型更新 → Python 重新量化 → C++ 代码不改 |
-| 无框架依赖 | C++ 不依赖 torchao、torch.ao、bitsandbytes |
-| 自定义算子不受影响 | quantize/dequant 在 QuantizedLinear 内部，外部全是 bf16 |
+**只需 2 个 CUDA kernel**——fused quantize + CUTLASS fused GEMM，比朴素方案（4-5 个 kernel）减少了一半以上的 kernel launch 开销。
 
 ---
 
@@ -568,118 +654,238 @@ for batch in calib_dataset:
 
 ---
 
-## 十、完整实施路线
+## 十、实战结果：从 1.6x 更慢到持平
+
+### 10.0 测试用例说明
+
+> **系列文章测试用例对比**——四篇文章使用了不同的测试场景和框架，数据不能直接横向对比：
+>
+> | | 第一篇（部署篇） | 第二篇（FA2 篇） | **第四篇（本文 INT8）** |
+> |---|--------|--------|--------|
+> | **测试脚本** | `test_vqa_bench.py` / `fake_inference.py` | `bench_fa2_vs_sdpa.py` | C++ `wallx_infer` |
+> | **输入数据** | 8 张真实图片 640×480 / 50 token 随机 tensor | 1 张真实图片 640×480 | Dummy 随机 tensor |
+> | **任务类型** | VQA 文本生成（128 tokens）/ 单次 forward | VQA 文本生成（64 tokens） | **Flow Action ODE 积分** |
+> | **推理方式** | Python `model.generate()` / `model()` | Python `model.generate()` | **C++ libtorch forward** |
+> | **序列长度** | 420 tokens（VQA）/ 50 tokens（fake） | ~420 tokens | **488 tokens** |
+> | **框架开销** | ~67% Python/HF 开销 | ~67% Python/HF 开销 | **无 Python 开销** |
+> | **Orin 延迟** | 13,898ms（VQA）/ 115ms（fake forward） | 6,360ms（FA2 VQA） | **557ms（Flow Action）** |
+>
+> ⚠️ 第一篇的 `fake_inference.py`（14.2ms / 115ms）是 50 token 随机 tensor 的单次 Transformer forward，**没有 ViT 编码、没有 ODE 积分、没有文本生成**，不代表任何真实任务的延迟。
+
+端到端 benchmark 使用的是 **Dummy 输入（随机数据）**，不是真实图片和文本。具体构成：
 
 ```
-Phase 1: 校准 + PTQ（5090 上，1-2 天）
-  ├── Step 1: 从训练集采样 256 条校准数据
-  ├── Step 2: 跑 SmoothQuant 收集激活值统计 + 计算平滑因子
-  ├── Step 3: 对 Decoder + ViT 的 Linear 层做 W8A8 动态量化
-  ├── Step 4: VQA 精度验证（对比 bf16 baseline）
-  └── Step 5: Flow Action 精度验证（对比轨迹 MSE）
-
-Phase 2: Orin 部署（Orin 上，1 天）
-  ├── Step 6: 把量化后的模型部署到 Orin
-  ├── Step 7: 确认 INT8 Tensor Core 被正确使用（nsys 验证 kernel 类型）
-  ├── Step 8: 完整 benchmark（INT8 vs bf16，VQA + Flow Action）
-  └── Step 9: 和第三篇的 C++ 框架叠加（INT8 + C++ decode + CUDA Graph）
-
-Phase 3: 精度修复（如果需要，1-3 天）
-  ├── Step 10: 如果某些层精度下降严重，该层回退 bf16
-  ├── Step 11: 尝试 per-channel 量化替代 per-tensor（更细粒度）
-  └── Step 12: 如果 PTQ 整体不够，评估 QAT 成本
+输入构成（模拟典型 VQA + Flow Action 场景）：
+  input_ids:       488 tokens = 200 文本(randint) + 256 图像(image_token_id) + 32 动作(action_token_id)
+  pixel_values:    torch::randn, 1024 patches × (3×2×14×14), 模拟 1 张 224×224 图
+  image_grid_thw:  [1, 32, 32] → 32×32 patches, merge 后 256 tokens
+  moe_token_types: 前 456=0(文本/视觉), 后 32=1(动作)
+  ODE timesteps:   5 步 Euler 积分
 ```
 
-### 10.1 预期结果
+对 **延迟 benchmark** 来说这是有效的——GEMM 耗时只取决于矩阵尺寸 (M×K×N)，不取决于具体数值。但 **不能用于精度验证**。
 
-| 配置 | 预期延迟 | 对比 |
-|------|----------|------|
-| bf16 baseline (Python) | ~115ms | 1x |
-| bf16 + C++ decode + CUDA Graph（第三篇） | ~80-90ms（估） | 1.3-1.4x |
-| **INT8 + C++ decode + CUDA Graph** | **~50-60ms（估）** | **~2x** |
+> **TODO：精度验证测试**
+> - [ ] 准备真实测试集：从 LeRobot 训练集抽取 10-50 条真实样本（图片 + 文本指令 + ground truth 动作轨迹）
+> - [ ] 对比 bf16 vs INT8 输出：逐层输出 cosine similarity、最终动作轨迹 MSE
+> - [ ] Flow Action 端到端精度：INT8 预测轨迹 vs bf16 预测轨迹 vs ground truth 的 L2 距离
+> - [ ] 确认 ODE 5 步积分是否放大了量化误差（对比单步 vs 多步的误差累积曲线）
+>
+> **TODO：VQA 文本生成基准测试**
+> - [x] C++ 引擎添加 `generate_text()` 方法（autoregressive decode loop + lm_head + argmax）——**已完成，实测 3469ms / 18.45 tok/s（64 tokens），比 Python FA2 快 1.83x**
+> - [x] 当前只有 `generate_flow_action()`，lm_head_weight_ 已加载但未使用——**已启用，支持 `--mode vqa`**
+> - [ ] VQA decode 是 M=1 逐 token 生成（标准 LLM 模式），INT8 对 memory-bound decode 可能有更大收益
+> - [ ] 测试指标：prefill tokens/s、decode tokens/s、首 token 延迟（TTFT）
+> - [ ] 对比 bf16 vs INT8 的 VQA 生成质量（BLEU / token accuracy）
+>
+> **INT8 VQA 收益预估**：C++ VQA decode 每步 49.0ms（GPU kernel ~29.7ms + GPU→CPU 同步 ~19ms）。Decode 阶段的 GEMV 是纯 bandwidth-bound（第二篇已证明跑在 Orin 带宽极限的 72%），INT8 权重读取量减半，理论上每步 GEMV 能省 ~10ms → 63 步累计省 ~630ms → 从 3469ms 降到 ~2840ms（~22.5 tok/s）。这比 Flow Action 的 INT8 收益大得多（Flow Action 的 Linear GEMM 仅占 GPU 时间 6.5%，而 VQA decode 的 GEMV 占 GPU kernel 的 ~60%）。VQA 是 INT8 量化真正能发力的场景。
 
-如果 GEMM 占 GPU 时间的 60%，INT8 把 GEMM 砍一半 → 整体节省 ~30%。叠加第三篇的 C++ 框架优化（消除 Python 开销 ~20%），总加速 ~2x。
+### 10.1 GEMM 微基准测试
+
+单层 GEMM 对比（K=N=2048，Orin 上测试）：
+
+| M（batch tokens） | bf16 (μs) | CUTLASS INT8 (μs) | 加速比 |
+|---|-----------|-------------------|---------|
+| 32 | 55.7 | 37.7 | **1.47×** |
+| 488 | 55.6 | 36.3 | **1.53×** |
+| 1024 | 56.2 | 39.3 | **1.43×** |
+| 4096 | 55.6 | 37.9 | **1.47×** |
+
+**CUTLASS INT8 在所有矩阵尺寸下都比 bf16 快 43-53%。**
+
+作为对比，朴素方案（torch::_int_mm）在相同尺寸下反而慢 50-60%。三条路线的 GEMM kernel 耗时：
+
+| 方案 | M=32 (μs) | M=488 (μs) | 说明 |
+|------|-----------|------------|------|
+| bf16 baseline | 55.7 | 55.6 | cuBLAS bf16 |
+| Route 1: _int_mm | ~90 | ~85 | INT32 输出 + dequant 分离 |
+| Route 2: cublasLt | ~75 | ~70 | fused quant + cublasLt INT8 |
+| **Route 3: CUTLASS** | **37.7** | **36.3** | **fused quant + CUTLASS EVT** |
+
+### 10.2 端到端推理基准
+
+完整推理管线（3 次取平均，Orin 上测试）：
+
+| 模型配置 | 总时间 (ms) | ViT (ms) | Prefill (ms) | ODE (ms) |
+|---------|-----------|---------|-------------|---------|
+| bf16 baseline | 556.7 | 221.1 | 198.2 | 134.9 |
+| **INT8 CUTLASS** | **553.9** | **220.9** | **198.1** | **132.2** |
+| INT8 朴素（Route 1） | 871.0 | — | — | — |
+
+**结论：CUTLASS INT8 端到端与 bf16 持平（554ms vs 557ms），比朴素 INT8 快 1.6 倍。但没有实现预期的"砍一半"加速。**
+
+### 10.3 nsys 深度分析：Amdahl 定律的铁律
+
+nsys profiling 揭示了真正的瓶颈分布（INT8 CUTLASS 模型）：
+
+| 算子类别 | GPU 时间占比 | 绝对时间 (ms) | 备注 |
+|---------|-----------|-------------|------|
+| **MoE Grouped GEMM** | **28.0%** | **409** | `dual_asym_grouped_gemm`，bf16，未量化 |
+| bf16 GEMM（杂项） | ~21% | ~307 | MoE 单 expert 回退 + Action Head |
+| **逐元素操作** | **~20%** | **~293** | 数千个小 kernel（add、mul、cast） |
+| CUTLASS INT8 GEMM | 6.5% | 95 | ← 我们优化的部分，已经很快了 |
+| Softmax | 3.6% | 53 | |
+| RMSNorm | 3.0% | 44 | |
+| fused_quantize | 2.4% | 35 | |
+| Flash Attention | 1.5% | 22 | |
+
+**关键发现**：
+
+1. **量化后的 Linear GEMM 只占 6.5%**——它已经被优化到不再是瓶颈
+2. **MoE Grouped GEMM 占 28%**——用自定义 `AsymmetricDualExpertGemm` CUTLASS kernel，始终 bf16，不走 LinearOp
+3. **逐元素操作占 20%**——成千上万的小 kernel（add、mul、type cast），单个很快但 launch overhead 巨大
+4. **33,552 次 cudaLaunchKernel 调用**，平均每次 21.7μs——光 CPU 端 launch 开销就吃掉了 ~728ms 的 wall clock time
+
+### 10.4 量化层覆盖情况
+
+| 模型组件 | 层数 | 实际状态 | 原因 |
+|---------|------|---------|------|
+| Decoder Attention (Q/K/V/O) | 36 × 4 = 144 | ✅ INT8 | 通过 LinearOp |
+| ViT Attention + MLP | 32 × 5 = 160 | ✅ INT8 | 通过 LinearOp |
+| MoE Expert Projections | 36 × 6 = 216 | ❌ bf16 | 用 `torch::linear`，不走 LinearOp |
+| Action Head (w1/w2/w3) | 3 | ❌ bf16 | 设计决策：ODE 误差放大 |
+| Embedding / LM Head | 2 | ❌ bf16 | 量化收益小 |
+
+**约 304 个 Linear 层已 INT8 量化，但 MoE 的 216 个 expert projection 仍是 bf16——这正是 nsys 中 28% MoE GEMM 的来源。**
 
 ---
 
-## 十一、量化方案的不确定性和备选路线
+## 十一、实战教训和下一步优化路线
 
-### 11.1 torchao 在 Orin aarch64 上的兼容性
+### 11.1 教训一：朴素 INT8 ≠ 自动加速
 
-torchao 是 PyTorch 2024 年推出的量化库，主要在 x86 + CUDA 上测试。JetPack 的 PyTorch 2.5 是定制版，torchao 不保证兼容。
+最大的教训：**不是所有 INT8 GEMM 都比 bf16 快**。PyTorch 的 `torch::_int_mm` 调用 cuBLAS INT8 GEMM，输出 INT32 到全局内存，再读回做 dequant。这个"标准"流程在 Orin 上反而更慢：
 
-**备选方案**：
-- 回退到 `torch.ao.quantization`（PyTorch 内置，更老但更稳定）
-- 手动实现：权重量化 + `torch._int_mm` 调用（最底层，最可控）
-- 在 5090 上量化，把量化后的权重文件（INT8 weights + scales）传到 Orin，Orin 上直接用
-
-### 11.2 如果 W8A8 精度不够
-
-降级路线：
-1. **W8A8 → W8A16**：只量化权重，激活保持 bf16（省内存但不加速 GEMM）
-2. **W8A8 → 混合精度**：敏感层用 bf16，其他用 INT8（逐层搜索最优配置）
-3. **PTQ → QAT**：如果 PTQ 精度损失 > 2%，做量化感知训练恢复精度
-
-### 11.3 如果 cuBLAS INT8 性能不达预期
-
-cuBLAS 的 INT8 GEMM 在小 batch size (batch=1) 下可能不如 bf16——因为 INT8 kernel 的 launch overhead 和 dequant 开销在 batch=1 时占比较大。
-
-**验证方法**：先写一个最小 benchmark，单独测 INT8 vs bf16 GEMM 的延迟：
-
-```python
-# 最小 INT8 GEMM benchmark
-import torch
-
-M, K, N = 1, 2048, 11008  # batch=1, FFN gate_proj 维度
-A = torch.randint(-128, 127, (M, K), dtype=torch.int8, device='cuda')
-B = torch.randint(-128, 127, (K, N), dtype=torch.int8, device='cuda')
-
-# INT8 GEMM
-%timeit torch._int_mm(A, B)
-
-# bf16 GEMM 对照
-A_bf16 = A.to(torch.bfloat16)
-B_bf16 = B.to(torch.bfloat16)
-%timeit A_bf16 @ B_bf16
+```
+朴素 INT8 的隐形开销：
+  1. INT32 输出写回 DRAM：4 bytes/elem vs bf16 的 2 bytes/elem → 带宽翻倍
+  2. cuBLAS heuristic 对 M=32 选了 128×64 tile → 效率低
+  3. splitK 策略额外引入 reduce kernel → 多一次 launch + 同步
+  
+  总计：GEMM 本身就慢了 1.5-1.6×，加上额外的 quant/dequant kernel → 端到端慢 1.6×
 ```
 
-如果 INT8 在 batch=1 下没有加速（可能发生），那量化的收益就只有内存节省。这时候应该优先做 **batched inference**（攒多个请求一起推理）来让 INT8 Tensor Core 充分利用。
+**解决方案是跳过 cuBLAS，直接用 CUTLASS 融合 dequant 进 epilogue。** 这不是"调参"能解决的——需要从 kernel 层面重新设计数据流。
+
+### 11.2 教训二：Amdahl 定律比你想的更残酷
+
+量化前 GEMM 占 ~25% GPU 时间（因为 MoE 用的是独立的 CUTLASS kernel）。即使 GEMM 加速 1.5×：
+
+```
+理论加速 = 1 / (1 - 0.25 + 0.25/1.5) = 1 / (0.75 + 0.167) = 1.09×
+```
+
+**最多 9% 的端到端加速**——实测 ~0.5%（554ms vs 557ms）。剩下的差距来自 kernel launch overhead 的微小波动。
+
+### 11.3 教训三：nsys profiling 是唯一的真相
+
+不做 profiling 之前，我们以为"GEMM 占 54-69%"（第二篇在 Python 推理中的结论）。换到 C++ 推理 + INT8 量化后，这个比例完全变了：
+
+```
+Python bf16 推理：GEMM 占 54-69%（Python 框架开销大，被包含在 GEMM 统计中）
+C++ INT8 推理：CUTLASS INT8 GEMM 占 6.5%（Python 开销消除后，非 GEMM 算子暴露）
+```
+
+**永远在实际环境下 profile，不要用历史数据推断。**
+
+### 11.4 下一步优化路线图
+
+基于 nsys 分析，按 ROI 排序：
+
+| 优先级 | 优化手段 | 目标 | 预期收益 | 复杂度 |
+|-------|---------|------|---------|-------|
+| **P0** | CUDA Graph（ODE 循环） | 消除 3.3 万次 kernel launch 开销 | 10-20% | 中 |
+| **P1** | MoE Expert INT8 量化 | 砍掉 28% 的 bf16 MoE GEMM | 15-25% | 高 |
+| P1 | 减少 ODE 步数（5→3→2） | 减少 40-60% 的 ODE 计算 | 20-40% | 需要重训 |
+| P2 | 算子融合（RMSNorm+Quant, GEMM+SiLU） | 减少逐元素 kernel 数量 | 10-15% | 中 |
+| P2 | W4A16 量化 | 权重体积再砍一半（memory-bound 场景更快） | 5-10% | 中 |
+| P3 | INT8 KV Cache | 减少 KV cache 内存占用和带宽 | 3-5% | 低 |
+
+**CUDA Graph 是最高 ROI 的下一步**：ODE 循环中 M=32 的 fixed-shape 推理非常适合 graph capture，可以把 33,552 次 kernel launch 合并为 5 次（每个 ODE step 一次 graph replay）。
 
 ---
 
 ## 十二、落地思考
 
-### 12.1 量化不是银弹
+### 12.1 量化真的不是银弹
 
-从第一篇到第四篇，优化路线走下来的逻辑是：
+从第一篇到第四篇，优化路线走下来的实际数据：
 
 ```
-第一篇：部署上去，跑通 baseline → 115ms
+第一篇：部署上去，跑通 baseline → Python bf16 ~1150ms（VQA pipeline）
 第二篇：试 FA2 → 不行（短序列 + Orin heuristic 不匹配）
-第三篇：C++ 消除 Python 开销 → 预计 ~80-90ms
-第四篇：INT8 量化砍 GEMM → 预计 ~50-60ms
+第三篇：C++ 消除 Python 开销 → 557ms（~2× 加速）
+第四篇：INT8 量化 → 554ms（朴素方案 871ms，CUTLASS 修正后持平）
 ```
 
-每一步都是在上一步的基础上叠加。**没有哪一步能单独解决问题**——C++ 只消除了 ~20% 的 Python 开销，量化只砍了 ~30% 的 GEMM 时间。叠加起来才有 ~2x 的整体加速。
+**INT8 量化在 kernel 层面确实快了 1.5×，但端到端几乎没有差距。** 原因很明确：
 
-### 12.2 从 115ms 到 50ms 够不够？
+1. C++ 推理已经消除了 Python 开销，暴露了真正的 GPU 瓶颈
+2. 量化只覆盖了 ~304 个 Linear 层（占 GPU 时间 ~25%），MoE 的 216 个 expert projection 仍是 bf16
+3. 33,552 次 kernel launch 的 CPU 端开销占了大量 wall clock time
+4. **优化已经进入"长尾"阶段——每一步的边际收益递减，但工程复杂度递增**
+
+### 12.2 从 557ms 要降到多少才够？
 
 wall-x 的动作控制频率要求：
-- 基础操作（抓取/放置）：10-20 Hz → 50-100ms/step → **够了**
-- 高精度操作（插入/对齐）：30-50 Hz → 20-33ms/step → **还差一点**
+- 基础操作（抓取/放置）：10-20 Hz → 50-100ms/step → **还差 5-10 倍**
+- 高精度操作（插入/对齐）：30-50 Hz → 20-33ms/step → **差 17-28 倍**
 
-如果还需要继续压，可能的方向：
-- **Batched generation**：攒 2-4 步的 decode，一次 launch 多个 GEMM
-- **模型蒸馏**：从 3B 蒸馏到 1B，GEMM 直接缩小
-- **Speculative decoding**：小模型预测 + 大模型验证
+这个差距靠单纯的推理优化已经填不满。真正的路线是：
+1. **CUDA Graph + 算子融合**：10-30% → ~400ms
+2. **MoE INT8 + 减少 ODE 步数**：30-50% → ~200-280ms
+3. **模型蒸馏**（3B → 1B）：再降 50% → ~100-140ms
+4. **异步流水线**（ViT / Transformer / ODE 重叠）：有效延迟再降
 
-但这些已经不是单纯的推理优化问题了——它们需要的是一个**端侧 AI 操作系统**。第五篇会正式展开这个方向。
+**具身智能的瓶颈不在 model，在 runtime。** 单次推理的"绝对延迟"能压到 100ms 已经很好了，但 10Hz 控制频率需要的是**流水线吞吐量**——多个推理请求重叠执行，摊平单步延迟。
 
-### 12.3 最重要的一句话
+#### 近期部署目标
 
-**先跑 INT8 GEMM 的最小 benchmark（上面 9.3 的脚本），确认 Orin 上 batch=1 的 INT8 真的比 bf16 快。** 如果不快，整个量化方案的前提就不成立——这时候应该优先做 batch 攒批或模型蒸馏。
+上面是理论极限。工程上，我们先定两个**可验证的近期目标**：
 
-这是整个量化方案的"第零步"。不跑这个，后面都是空中楼阁。
+| 任务 | 当前延迟 | 目标频率 | 目标延迟 | 约束 |
+|------|---------|---------|---------|------|
+| **Flow Action** | 554 ms (1.81 Hz) | **2-3 Hz** | **333-500 ms** | 控制回路硬约束 |
+| **VQA** | ~1313 ms (20tok) | **~1 Hz** | **< 1.2 s** | max_new_tokens ≤ 20 |
+
+为什么 VQA 目标只要 ~1 Hz？因为 **VQA 不在机器人的控制回路中**。Flow Action 才是驱动机械臂的关键路径。VQA 的角色是训练基座（提供视觉理解能力）、量化精度评估的标尺、以及调试时的感知验证工具——秒级响应足够。VQA 限制 max_new_tokens=20（机器人场景下回答通常 10-15 tokens）后，当前 C++ 引擎已接近 1 Hz，**Flow Action 才是优化主战场**。
+
+基于这两个目标，INT8 的优先级重新排序：
+
+| 优化手段 | Flow Action 收益 | VQA 收益 | 优先级 |
+|---------|-----------------|---------|--------|
+| **CUDA Graph** | 高（ODE shape 固定） | 中（decode 每步需 GPU sync） | **最高** |
+| **INT8 VQA decode** | 低（GEMM 仅占 6.5%） | **高**（GEMV bandwidth-bound，每步省 ~10ms） | 高 |
+| **MoE INT8** | 中（MoE 占 GPU 28%） | 中 | 中 |
+| **Triton fused kernel** | 中（fused_add_rmsnorm 快 3.9x） | 中 | 中 |
+
+### 12.3 本篇最重要的三句话
+
+1. **"标准"INT8 GEMM 可能比 bf16 更慢**——不要相信理论吞吐量，在目标硬件上实测。cuBLAS 的 heuristic 不是万能的，CUTLASS 自定义 kernel 才是正道。
+
+2. **Amdahl 定律是铁律**——优化 25% 的代码，即使快 2 倍，端到端也只快 14%。nsys profiling 是做任何优化之前的"第零步"。
+
+3. **量化的真正价值是内存**——INT8 权重体积是 bf16 的一半。在 Orin 64GB 这种内存受限的边缘设备上，省下的内存可以用来跑更大的 batch、更长的 KV cache、或者并行部署更多模型。计算加速只是锦上添花。
 
 ---
 
@@ -696,18 +902,19 @@ wall-x 的动作控制频率要求：
 **第三篇**：[用 C++ 替换 Python 推理：在 Orin 上把 wall-x 跑到当前精度的极限](#)
 - VQA 热路径分析、CUDA vs TensorRT 方案选型、libtorch + CUDA Graph 实施计划
 
-**第四篇（本文）**：INT8 量化落地
-- PyTorch vs TensorRT vs ONNX 选型、分层量化策略、SmoothQuant + W8A8
-- 量化变换的算子图和权重陷阱（asym_dual_gmm、RoPE dtype、state_dict）
-- C++ 推理框架和量化的兼容性：Python 量化 + C++ 推理分离方案
-- Flow Action ODE 积分的精度风险和应对策略
+**第四篇（本文）**：INT8 量化实战——从理论 2× 加速到 Amdahl 定律的铁壁
+- 三条 INT8 GEMM 路线对比：朴素（慢 1.6×）→ cublasLt（仍慢）→ CUTLASS EVT（快 1.5×）
+- CUTLASS Epilogue Visitor Tree 融合 dequant 的实现细节
+- Orin SM 8.7 MMA 指令全景（INT8 m16n8k32 = 2× bf16 吞吐）
+- nsys 深度分析：MoE 28%、逐元素 20%、33K kernel launch
+- 端到端 554ms vs 557ms：Amdahl 定律的残酷验证
 
-**第五篇（预告）**：端侧 AI OS —— 从推理优化到系统架构
-- 前四篇的结论汇聚：**具身智能的瓶颈不在 model，而在 runtime**
-- VLA 是有损压缩的物理模拟器，提高刷新率比提高单次精度更有价值
-- 从 model set runtime 到端侧 AI OS：感知-决策-执行的实时流水线、硬件抽象、资源调度
-- **附 1.0 版本 GitHub 地址**
+**第五篇（预告）**：CUDA Graph + 算子融合——消灭 3.3 万次 kernel launch
+- CUDA Graph 捕获 ODE 循环的 fixed-shape 推理
+- RMSNorm + Quantize 算子融合
+- MoE Grouped GEMM 的 INT8 改造
+- 从 557ms 到 ~400ms 的最后一公里
 
 ---
 
-*测试环境：wall-oss-flow 3B 模型，bfloat16 精度 → INT8 量化，batch_size=1。测试平台：校准在 RTX 5090 上完成，部署和 benchmark 在 Jetson AGX Orin 64GB 上完成。JetPack 6.2.1，CUDA 12.6，PyTorch 2.5.0a0+872d972e41.nv24.08。2026 年 4 月。*
+*测试环境：wall-oss-flow 3B 模型。量化：Per-channel 权重 INT8 + Per-token 动态激活 INT8（无 SmoothQuant），Python 离线量化导出。推理：C++ libtorch + CUTLASS 4.0 融合 INT8 GEMM（EVT dequant epilogue）。测试平台：Jetson AGX Orin 64GB，JetPack 6.2.1，CUDA 12.6，PyTorch 2.5.0a0+872d972e41.nv24.08。Profiling 工具：nsys 2024.7.1 + ncu。2026 年 4 月。*

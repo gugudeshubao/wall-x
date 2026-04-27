@@ -4,6 +4,7 @@
 
 **TL;DR**
 - Wall-X 有两条动作路径：**AR（自回归离散 token）** 和 **Flow（连续流匹配）**。当前主力是 Flow 路径
+- 这里的 **AR = Autoregressive（自回归）**，不是 Augmented Reality（增强现实）；**VQA = Visual Question Answering（视觉问答）**
 - Flow 路径不是"transformer 直接回归动作值"，而是 **transformer 预测速度场 v(x,t)，再用 ODE 积分推出最终动作**
 - 动作 token 不是独立的 head，而是 **直接嵌入到统一多模态序列中**——和 text、image、proprioception token 一起送进 transformer
 - 核心技巧：**Prefix-Postfix KV Cache 分离**——静态上下文只算一次，ODE 每步只重算 action 区域（32 tokens）
@@ -17,6 +18,13 @@
 
 Wall-X 的代码里其实有两条动作生成路径：
 
+先说明两个容易混淆的缩写：
+
+- **VQA = Visual Question Answering**，意思是"给模型一张图和一个问题，让它输出自然语言回答"
+- **AR = Autoregressive**，意思是"每次预测下一个 token，再把它接回输入里继续生成"
+
+所以本文里的"AR 路径"，不是增强现实，而是**像生成文本一样逐 token 生成**。
+
 ### 1.1 AR 路径：像生成文本一样生成动作
 
 ```
@@ -24,6 +32,26 @@ prompt → generate() → 离散 action token ids → decode → 动作序列
 ```
 
 这条路径复用了标准的自回归文本生成框架（HuggingFace `generate()`）。模型在词表中添加了特殊的 action token，逐个生成后再解码回连续动作。
+
+如果你熟悉 VQA，这条路径其实很好理解，因为 **VQA 本身也是一条 AR 链路**：
+
+```
+image + question
+  → visual encoder 把图片压成 visual tokens
+  → visual tokens 和 text tokens 一起送入 causal decoder
+  → lm_head 预测下一个答案 token
+  → generate() + KV Cache 逐 token 生成完整回答
+```
+
+这里有一个关键点：**AR 式 VQA 通常不需要额外的 "VQA head"。** 它本质上就是一个多模态 next-token prediction 任务。图片先变成 visual tokens，问题文本和图片 token 拼成统一序列，然后直接用语言模型的 `lm_head` 做下一个 token 预测。
+
+从这个角度看，Wall-X 的 **AR 动作路径和 VQA 的关系** 很直接：
+
+1. **共享生成范式**：两者都走 `generate()`，都是标准 autoregressive decode
+2. **共享多模态主干**：图片、文本指令先融合进同一条 transformer 主干
+3. **只是在输出语义上不同**：VQA 输出自然语言 token；AR 动作输出离散 action token，最后再 decode 回连续动作
+
+也正因为 AR 动作本质上是在复用 VQA/文本生成那套基础设施，所以它实现简单、工程成熟，但缺点也和 VQA 一样明显：**必须串行一步一步生成**。对机器人控制这种追求 2-3 Hz 闭环频率的场景，这种串行性会很快变成瓶颈。
 
 **优点**：框架简单，复用所有文本生成的基础设施（beam search、sampling strategy 等）
 **缺点**：离散化会损失精度；生成长度和动作维度耦合；无法利用动作空间的连续性

@@ -23,19 +23,26 @@ void Attention::load_weights(const WeightMap& weights, const std::string& prefix
         return it->second;
     };
 
-    q_proj_weight_ = get("self_attn.q_proj.weight");
-    k_proj_weight_ = get("self_attn.k_proj.weight");
-    v_proj_weight_ = get("self_attn.v_proj.weight");
-    o_proj_weight_ = get("self_attn.o_proj.weight");
-
-    // Biases are optional (Qwen2.5 has them for QKV)
     auto try_get = [&](const std::string& name) -> torch::Tensor {
         auto it = weights.find(prefix + name);
         return (it != weights.end()) ? it->second : torch::Tensor();
     };
-    q_proj_bias_ = try_get("self_attn.q_proj.bias");
-    k_proj_bias_ = try_get("self_attn.k_proj.bias");
-    v_proj_bias_ = try_get("self_attn.v_proj.bias");
+
+    // Load projections via LinearOp (auto-detects INT8 by weight dtype)
+    auto load_proj = [&](LinearOp& op, const std::string& name) {
+        op.load(get(name + ".weight"),
+                try_get(name + ".weight_scale"),
+                try_get(name + ".bias"));
+    };
+
+    load_proj(q_proj_, "self_attn.q_proj");
+    load_proj(k_proj_, "self_attn.k_proj");
+    load_proj(v_proj_, "self_attn.v_proj");
+    load_proj(o_proj_, "self_attn.o_proj");
+
+    if (q_proj_.is_int8()) {
+        std::cout << "    [INT8] Attention layer " << layer_idx_ << " using W8A8 quantization" << std::endl;
+    }
 }
 
 torch::Tensor Attention::forward(const torch::Tensor& x,
@@ -47,10 +54,10 @@ torch::Tensor Attention::forward(const torch::Tensor& x,
     auto batch = x.size(0);
     auto seq_len = x.size(1);
 
-    // Q/K/V projections via linear (cuBLAS)
-    auto q = torch::linear(x, q_proj_weight_, q_proj_bias_.defined() ? q_proj_bias_ : torch::Tensor());
-    auto k = torch::linear(x, k_proj_weight_, k_proj_bias_.defined() ? k_proj_bias_ : torch::Tensor());
-    auto v = torch::linear(x, v_proj_weight_, v_proj_bias_.defined() ? v_proj_bias_ : torch::Tensor());
+    // Q/K/V projections via LinearOp (bf16 or INT8 depending on loaded weights)
+    auto q = q_proj_.forward(x);
+    auto k = k_proj_.forward(x);
+    auto v = v_proj_.forward(x);
 
     // Reshape: [batch, seq, num_heads * head_dim] -> [batch, num_heads, seq, head_dim]
     q = q.view({batch, seq_len, num_heads_, head_dim_}).transpose(1, 2);
@@ -93,5 +100,5 @@ torch::Tensor Attention::forward(const torch::Tensor& x,
     attn_output = attn_output.transpose(1, 2).contiguous().view({batch, seq_len, hidden_size_});
 
     // Output projection
-    return torch::linear(attn_output, o_proj_weight_);
+    return o_proj_.forward(attn_output);
 }
