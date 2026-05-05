@@ -1,0 +1,63 @@
+{
+  "wallx": {
+    "processor_class": "Qwen2_5_VLProcessor",
+    "has_helpful_assistant_fallback": true,
+    "has_tools_branch": true,
+    "has_image_pad_token": true,
+    "has_video_pad_token": true,
+    "has_vision_start_token": true,
+    "has_vision_end_token": true,
+    "has_proprio_token": true,
+    "has_action_token": true,
+    "action_token_count": 2048,
+    "chat_template_prefix": "{%- if tools %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- messages[0]['content'] }}\n    {%- else %}\n        {{- 'You are a helpful assistant.' }}\n    {%- endif %}\n    {{- \"\\n\\n# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\nYou are provided with function signatures within <tools></tools> XML tags:\\n<tools>\" }}\n    {%"
+  },
+  "qwen25_edge_llm": {
+    "model_path": "Qwen/Qwen2.5-VL-3B-Instruct",
+    "processor_class": "Qwen2_5_VLProcessor",
+    "default_system_prompt": "You are a helpful assistant.",
+    "generation_prompt": "<|im_start|>assistant\n",
+    "image_format": "<|vision_start|><|image_pad|><|vision_end|>",
+    "video_format": "<|vision_start|><|video_pad|><|vision_end|>",
+    "roles": {
+      "system": {
+        "prefix": "<|im_start|>system\n",
+        "suffix": "<|im_end|>\n"
+      },
+      "user": {
+        "prefix": "<|im_start|>user\n",
+        "suffix": "<|im_end|>\n"
+      },
+      "assistant": {
+        "prefix": "<|im_start|>assistant\n",
+        "suffix": "<|im_end|>\n"
+      }
+    },
+    "has_proprio_token": false,
+    "has_action_token": false
+  },
+  "qwen3_edge_llm": {
+    "model_path": "Qwen/Qwen3-VL-2B-Instruct",
+    "processor_class": "Qwen3VLProcessor",
+    "default_system_prompt": "",
+    "generation_prompt": "<|im_start|>assistant\n",
+    "image_format": "<|vision_start|><|image_pad|><|vision_end|>",
+    "video_format": "<|vision_start|><|video_pad|><|vision_end|>",
+    "roles": {
+      "system": {
+        "prefix": "<|im_start|>system\n",
+        "suffix": "<|im_end|>\n"
+      },
+      "user": {
+        "prefix": "<|im_start|>user\n",
+        "suffix": "<|im_end|>\n"
+      },
+      "assistant": {
+        "prefix": "<|im_start|>assistant\n",
+        "suffix": "<|im_end|>\n"
+      }
+    },
+    "has_proprio_token": false,
+    "has_action_token": false
+  }
+}

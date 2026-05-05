@@ -1,0 +1,20 @@
+{
+  "models": [
+    {
+      "model_name": "qwen25vl3b",
+      "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+      "questions": {
+        "Describe what you see in this image.": {
+          "n": 8,
+          "mean_latency_ms": 6723.478126368718,
+          "mean_similarity": 0.465203416957971
+        },
+        "What objects are on the table?": {
+          "n": 8,
+          "mean_latency_ms": 6838.5337034997065,
+          "mean_similarity": 0.3988347828192778
+        }
+      }
+    }
+  ]
+}

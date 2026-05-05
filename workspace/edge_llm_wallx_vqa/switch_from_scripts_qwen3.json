@@ -1,0 +1,35 @@
+{
+  "question": "Describe what you see in this image.",
+  "image_path": "/data/wy/wall-x/workspace/edge_llm_wallx_vqa/runtime_tmp/edge_llm_vqa_2b24nnj1/input_image.png",
+  "max_new_tokens": 20,
+  "system_prompt": "",
+  "latency_ms": 4970.847387099639,
+  "output_text": "This image is a simple, minimalist graphic composed of several geometric shapes on a two-tone background. The",
+  "raw_response": {
+    "input_file": "/data/wy/wall-x/workspace/edge_llm_wallx_vqa/runtime_tmp/edge_llm_vqa_2b24nnj1/input.json",
+    "responses": [
+      {
+        "batch_idx": 0,
+        "formatted_complete_request": "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>Describe what you see in this image.<|im_end|>\n<|im_start|>assistant\n",
+        "formatted_system_prompt": "",
+        "messages": [
+          {
+            "content": [
+              {
+                "image": "/data/wy/wall-x/workspace/edge_llm_wallx_vqa/runtime_tmp/edge_llm_vqa_2b24nnj1/input_image.png",
+                "type": "image"
+              },
+              {
+                "text": "Describe what you see in this image.",
+                "type": "text"
+              }
+            ],
+            "role": "user"
+          }
+        ],
+        "output_text": "This image is a simple, minimalist graphic composed of several geometric shapes on a two-tone background. The",
+        "request_idx": 0
+      }
+    ]
+  }
+}

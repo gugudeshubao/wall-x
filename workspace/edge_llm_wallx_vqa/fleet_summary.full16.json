@@ -1,0 +1,342 @@
+{
+  "models": [
+    {
+      "model_name": "qwen25vl3b",
+      "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+      "num_cases": 16,
+      "mean_latency_ms": 7488.738913612906,
+      "mean_similarity": 0.36361846036472656,
+      "cases": [
+        {
+          "case_id": "00_blocks_and_plates",
+          "image": "blocks_and_plates.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image features a simple, flat design with a light blue background. At the center, there are",
+          "candidate_answer": "The image shows a simple arrangement of geometric shapes on a blue background. There are three circular shapes and three cubic shapes. The circular shapes are colored red, yellow",
+          "latency_ms": 7440.061502973549,
+          "similarity": 0.40293040293040294,
+          "reference_latency_ms": 3251.6
+        },
+        {
+          "case_id": "01_blocks_and_plates",
+          "image": "blocks_and_plates.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the objects on the table. There are three distinct shapes: a",
+          "candidate_answer": "The objects on the table are:\n\n1. A red oval shape\n2. A yellow oval shape\n3. A green oval shape\n4. A red",
+          "latency_ms": 7728.749218978919,
+          "similarity": 0.42780748663101603,
+          "reference_latency_ms": 3279.3
+        },
+        {
+          "case_id": "02_dual_arm_robot",
+          "image": "dual_arm_robot.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image depicts a minimalist composition featuring a light blue background with a brown rectangular base. On the base",
+          "candidate_answer": "The image shows a simple geometric shape composed of two vertical lines connected by a horizontal line at the bottom. The horizontal line is divided into three segments: one red",
+          "latency_ms": 7518.698091967963,
+          "similarity": 0.31756756756756754,
+          "reference_latency_ms": 3272.4
+        },
+        {
+          "case_id": "03_dual_arm_robot",
+          "image": "dual_arm_robot.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+          "candidate_answer": "The objects on the table are a red circle, a blue square, and a yellow circle.",
+          "latency_ms": 7256.474351044744,
+          "similarity": 0.3712574850299401,
+          "reference_latency_ms": 3203.5
+        },
+        {
+          "case_id": "04_fruits_on_table",
+          "image": "fruits_on_table.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image features a minimalist composition with a brown background. In the center, there are three distinct shapes",
+          "candidate_answer": "The image depicts four colorful objects placed on a flat surface. The objects are:\n\n1. A red object on the left side.\n2. A yellow object in",
+          "latency_ms": 7435.3005239972845,
+          "similarity": 0.308300395256917,
+          "reference_latency_ms": 3326.8
+        },
+        {
+          "case_id": "05_fruits_on_table",
+          "image": "fruits_on_table.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. There are three",
+          "candidate_answer": "The objects on the table are:\n\n1. A red apple\n2. A yellow apple\n3. A green apple\n4. A white plate",
+          "latency_ms": 7747.873675078154,
+          "similarity": 0.33879781420765026,
+          "reference_latency_ms": 3228.4
+        },
+        {
+          "case_id": "06_real_tabletop_1",
+          "image": "real_tabletop_1.jpg",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "On the floor, there is an open book with dried flowers, which is a custom photo book.",
+          "candidate_answer": "The image shows an open book placed on a wooden surface. The book appears to be a photo album or a collection of photographs, as it contains several images of",
+          "latency_ms": 7510.192672954872,
+          "similarity": 0.3374485596707819,
+          "reference_latency_ms": 3271.0
+        },
+        {
+          "case_id": "07_real_tabletop_1",
+          "image": "real_tabletop_1.jpg",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+          "candidate_answer": "The objects on the table are:\n\n1. An open book with several photographs and text.\n2. A black bookmark with a white flower attached to it.\n3",
+          "latency_ms": 7796.45793500822,
+          "similarity": 0.2643171806167401,
+          "reference_latency_ms": 3245.9
+        },
+        {
+          "case_id": "08_real_tabletop_2",
+          "image": "real_tabletop_2.jpg",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image features a black dog, likely a Labrador Retriever, lying on a weathered wooden",
+          "candidate_answer": "The image shows a black puppy standing on a wooden surface. The puppy has a curious expression, with wide eyes and a slightly open mouth. The background is a",
+          "latency_ms": 7388.8827139744535,
+          "similarity": 0.3183673469387755,
+          "reference_latency_ms": 3249.5
+        },
+        {
+          "case_id": "09_real_tabletop_2",
+          "image": "real_tabletop_2.jpg",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify any objects on the table. The table appears",
+          "candidate_answer": "There is a black dog on the table in the picture.",
+          "latency_ms": 7088.982712943107,
+          "similarity": 0.42028985507246375,
+          "reference_latency_ms": 3235.5
+        },
+        {
+          "case_id": "10_real_tabletop_3",
+          "image": "real_tabletop_3.jpg",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "In a wooden bowl, there is a pile of green beans.",
+          "candidate_answer": "The image shows a close-up view of a pile of fresh green beans. The beans are vibrant and appear to be freshly harvested, with their green color indicating they",
+          "latency_ms": 7483.120606979355,
+          "similarity": 0.2679425837320574,
+          "reference_latency_ms": 2498.8
+        },
+        {
+          "case_id": "11_real_tabletop_3",
+          "image": "real_tabletop_3.jpg",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+          "candidate_answer": "The table has a large pile of fresh green beans on it.",
+          "latency_ms": 7087.594025069848,
+          "similarity": 0.2097902097902098,
+          "reference_latency_ms": 3213.4
+        },
+        {
+          "case_id": "12_robot_gripper",
+          "image": "robot_gripper.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image depicts a minimalist, computer-generated scene set against a solid blue background. Dominating the center",
+          "candidate_answer": "The image shows a simple geometric composition on a blue background. There are four shapes: a red circle, a blue cylinder, a green rectangle, and a gray",
+          "latency_ms": 7405.918773962185,
+          "similarity": 0.4419475655430712,
+          "reference_latency_ms": 3209.5
+        },
+        {
+          "case_id": "13_robot_gripper",
+          "image": "robot_gripper.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+          "candidate_answer": "The objects on the table are:\n\n1. A red circle\n2. A blue cylinder\n3. A green rectangle\n4. A gray vertical rectangle",
+          "latency_ms": 7832.725299987942,
+          "similarity": 0.33497536945812806,
+          "reference_latency_ms": 3233.2
+        },
+        {
+          "case_id": "14_stacking_task",
+          "image": "stacking_task.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image displays a simple geometric composition against a solid blue background. There are four blocks of different colors",
+          "candidate_answer": "The image shows a simple arrangement of colored squares on a blue background. There are five squares in total, each with a different color:\n\n1. The first square",
+          "latency_ms": 7533.638470922597,
+          "similarity": 0.6148409893992933,
+          "reference_latency_ms": 3197.6
+        },
+        {
+          "case_id": "15_stacking_task",
+          "image": "stacking_task.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify any objects on the table. The image shows",
+          "candidate_answer": "There are no objects on the table in the image. The image shows a blue background with four colored squares arranged in a row.",
+          "latency_ms": 7565.152041963302,
+          "similarity": 0.4413145539906103,
+          "reference_latency_ms": 3209.8
+        }
+      ]
+    },
+    {
+      "model_name": "qwen3vl2b",
+      "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+      "num_cases": 16,
+      "mean_latency_ms": 5452.962853443751,
+      "mean_similarity": 0.4041459784034522,
+      "cases": [
+        {
+          "case_id": "00_blocks_and_plates",
+          "image": "blocks_and_plates.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image features a simple, flat design with a light blue background. At the center, there are",
+          "candidate_answer": "The image displays a collection of geometric shapes on a solid blue background. The shapes are arranged in two rows.\n\nThe top row contains three ovals:\n- The",
+          "latency_ms": 5434.237912995741,
+          "similarity": 0.4541832669322709,
+          "reference_latency_ms": 3251.6
+        },
+        {
+          "case_id": "01_blocks_and_plates",
+          "image": "blocks_and_plates.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the objects on the table. There are three distinct shapes: a",
+          "candidate_answer": "Based on the image provided, there are three objects on the table:\n\n- A red, oval-shaped object with a darker red outline.\n- A yellow, oval",
+          "latency_ms": 5452.219447004609,
+          "similarity": 0.4144144144144144,
+          "reference_latency_ms": 3279.3
+        },
+        {
+          "case_id": "02_dual_arm_robot",
+          "image": "dual_arm_robot.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image depicts a minimalist composition featuring a light blue background with a brown rectangular base. On the base",
+          "candidate_answer": "This image displays a stylized, minimalist illustration of a robot's head, likely a simple robot or a character from a game. The design is composed of geometric",
+          "latency_ms": 5457.015561987646,
+          "similarity": 0.25806451612903225,
+          "reference_latency_ms": 3272.4
+        },
+        {
+          "case_id": "03_dual_arm_robot",
+          "image": "dual_arm_robot.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+          "candidate_answer": "Based on the image provided, the objects on the table are:\n\n- A red oval\n- A blue square\n- A yellow oval",
+          "latency_ms": 5368.419410078786,
+          "similarity": 0.4791666666666667,
+          "reference_latency_ms": 3203.5
+        },
+        {
+          "case_id": "04_fruits_on_table",
+          "image": "fruits_on_table.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image features a minimalist composition with a brown background. In the center, there are three distinct shapes",
+          "candidate_answer": "This image is a simple, stylized illustration of a face, likely representing a character from a cartoon or animation. The face is composed of several geometric shapes on",
+          "latency_ms": 5445.163161959499,
+          "similarity": 0.31690140845070425,
+          "reference_latency_ms": 3326.8
+        },
+        {
+          "case_id": "05_fruits_on_table",
+          "image": "fruits_on_table.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. There are three",
+          "candidate_answer": "Based on the image provided, the objects on the table are:\n\n- A red apple\n- An orange\n- A yellow object (possibly a lemon or a",
+          "latency_ms": 5454.915406997316,
+          "similarity": 0.44339622641509435,
+          "reference_latency_ms": 3228.4
+        },
+        {
+          "case_id": "06_real_tabletop_1",
+          "image": "real_tabletop_1.jpg",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "On the floor, there is an open book with dried flowers, which is a custom photo book.",
+          "candidate_answer": "This is a top-down photograph of a wooden surface with a few items arranged on it. The main elements are:\n\n- An open book, likely a magazine or",
+          "latency_ms": 5477.269285940565,
+          "similarity": 0.21145374449339208,
+          "reference_latency_ms": 3271.0
+        },
+        {
+          "case_id": "07_real_tabletop_1",
+          "image": "real_tabletop_1.jpg",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+          "candidate_answer": "Based on the image provided, the objects on the table are:\n\n- An open book\n- A black card or small notebook\n- A bundle of dried,",
+          "latency_ms": 5489.877871004865,
+          "similarity": 0.4444444444444444,
+          "reference_latency_ms": 3245.9
+        },
+        {
+          "case_id": "08_real_tabletop_2",
+          "image": "real_tabletop_2.jpg",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image features a black dog, likely a Labrador Retriever, lying on a weathered wooden",
+          "candidate_answer": "This is a close-up, top-down photograph of a young, black puppy. The puppy is lying on a weathered, wooden floor with visible grain and texture",
+          "latency_ms": 5473.318857024424,
+          "similarity": 0.4069264069264069,
+          "reference_latency_ms": 3249.5
+        },
+        {
+          "case_id": "09_real_tabletop_2",
+          "image": "real_tabletop_2.jpg",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify any objects on the table. The table appears",
+          "candidate_answer": "Based on the image provided, there are no objects on the table. The image shows a black puppy lying on a wooden surface, which appears to be a wooden",
+          "latency_ms": 5445.704421028495,
+          "similarity": 0.4789915966386555,
+          "reference_latency_ms": 3235.5
+        },
+        {
+          "case_id": "10_real_tabletop_3",
+          "image": "real_tabletop_3.jpg",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "In a wooden bowl, there is a pile of green beans.",
+          "candidate_answer": "This image shows a close-up view of a large pile of fresh, green beans. The beans are densely packed and fill the frame, with their long, slender",
+          "latency_ms": 5468.488235026598,
+          "similarity": 0.28865979381443296,
+          "reference_latency_ms": 2498.8
+        },
+        {
+          "case_id": "11_real_tabletop_3",
+          "image": "real_tabletop_3.jpg",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+          "candidate_answer": "Based on the image provided, the objects on the table are green beans. They are piled in a wooden container, likely a basket or a box, and are",
+          "latency_ms": 5455.336450017057,
+          "similarity": 0.4675324675324675,
+          "reference_latency_ms": 3213.4
+        },
+        {
+          "case_id": "12_robot_gripper",
+          "image": "robot_gripper.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image depicts a minimalist, computer-generated scene set against a solid blue background. Dominating the center",
+          "candidate_answer": "This image is a simple, flat-style graphic with a minimalist design. It features a vertical, dark gray bar that appears to be a handle or a lever,",
+          "latency_ms": 5430.878084036522,
+          "similarity": 0.39080459770114945,
+          "reference_latency_ms": 3209.5
+        },
+        {
+          "case_id": "13_robot_gripper",
+          "image": "robot_gripper.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+          "candidate_answer": "Based on the image provided, there are three objects on the table:\n\n- A red circular object, which appears to be a button or a knob.\n- A",
+          "latency_ms": 5445.338627905585,
+          "similarity": 0.4017857142857143,
+          "reference_latency_ms": 3233.2
+        },
+        {
+          "case_id": "14_stacking_task",
+          "image": "stacking_task.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image displays a simple geometric composition against a solid blue background. There are four blocks of different colors",
+          "candidate_answer": "The image displays a simple, abstract composition of five colored squares arranged horizontally on a solid blue background. The squares are aligned in a row from left to right,",
+          "latency_ms": 5439.907573047094,
+          "similarity": 0.62,
+          "reference_latency_ms": 3197.6
+        },
+        {
+          "case_id": "15_stacking_task",
+          "image": "stacking_task.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify any objects on the table. The image shows",
+          "candidate_answer": "Based on the image provided, there are four colored squares arranged in a row on a blue background. The objects on the table are:\n\n- A red square\n",
+          "latency_ms": 5509.31534904521,
+          "similarity": 0.38961038961038963,
+          "reference_latency_ms": 3209.8
+        }
+      ]
+    }
+  ]
+}

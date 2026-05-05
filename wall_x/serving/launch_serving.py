@@ -55,6 +55,10 @@ class ModelConfig:
     dtype: str = "bfloat16"
     # Prediction mode (fast or slow)
     predict_mode: str = "fast"
+    # Optional VQA backend selection
+    vqa_backend: str = "wallx"
+    # Optional Edge-LLM backend config path
+    edge_backend_config: str | None = None
     # Camera key for the environment
     camera_key: List[str] = field(
         default_factory=lambda: ["front_view", "left_wrist_view", "right_wrist_view"]
@@ -157,6 +161,8 @@ def create_policy(args: Args) -> WallXPolicy:
         predict_mode=config.predict_mode,
         default_prompt=args.default_prompt,
         camera_key=config.camera_key,
+        backend=config.vqa_backend,
+        edge_backend_config=config.edge_backend_config,
     )
 
     return policy

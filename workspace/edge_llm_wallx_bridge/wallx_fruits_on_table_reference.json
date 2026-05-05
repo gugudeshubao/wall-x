@@ -1,0 +1,10 @@
+{
+  "responses": [
+    {
+      "output_text": "The image features a minimalist composition with a brown background. In the center, there are three distinct shapes",
+      "image": "fruits_on_table.png",
+      "question": "Describe what you see in this image.",
+      "source": "data/int8_vqa_results_orin.json"
+    }
+  ]
+}

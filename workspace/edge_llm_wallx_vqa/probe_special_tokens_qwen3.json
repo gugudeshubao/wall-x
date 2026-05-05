@@ -1,0 +1,30 @@
+{
+  "backend_config": "backend_config.orin.qwen3.json",
+  "image": "/data/wy/wall-x/test_images/fruits_on_table.png",
+  "results": [
+    {
+      "prompt": "What objects are on the table?",
+      "latency_ms": 4930.063797044568,
+      "output_text": "Based on the image provided, the objects on the table are:\n\n- A red apple\n- An",
+      "formatted_complete_request": "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>What objects are on the table?<|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+      "prompt": "What objects are on the table?\nProprioception: <|propri|>",
+      "latency_ms": 4896.4200200280175,
+      "output_text": "Based on the image provided, the objects on the table are:\n\n- A red apple\n- An",
+      "formatted_complete_request": "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>What objects are on the table?\nProprioception: <|propri|><|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+      "prompt": "What objects are on the table?\n<|action|>",
+      "latency_ms": 4930.11461594142,
+      "output_text": "Based on the image provided, the objects on the table are:\n\n- A red apple\n- An",
+      "formatted_complete_request": "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>What objects are on the table?\n<|action|><|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+      "prompt": "Predict the next action in robot action.\nProprioception: <|propri|>\n<|action|>",
+      "latency_ms": 4862.847893033177,
+      "output_text": "The next action in robot action is to move the robot's head to the right.",
+      "formatted_complete_request": "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>Predict the next action in robot action.\nProprioception: <|propri|>\n<|action|><|im_end|>\n<|im_start|>assistant\n"
+    }
+  ]
+}

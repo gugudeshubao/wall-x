@@ -1,0 +1,36 @@
+{
+    "input_file": "/data/wy/wall-x/workspace/edge_llm_exp/bridge_runs_wallx_prompt/input_vlm_qwen3vl2b.json",
+    "responses": [
+        {
+            "batch_idx": 0,
+            "formatted_complete_request": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>Describe what you see in this image.<|im_end|>\n<|im_start|>assistant\n",
+            "formatted_system_prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n",
+            "messages": [
+                {
+                    "content": [
+                        {
+                            "text": "You are a helpful assistant.",
+                            "type": "text"
+                        }
+                    ],
+                    "role": "system"
+                },
+                {
+                    "content": [
+                        {
+                            "image": "/data/wy/wall-x/test_images/fruits_on_table.png",
+                            "type": "image"
+                        },
+                        {
+                            "text": "Describe what you see in this image.",
+                            "type": "text"
+                        }
+                    ],
+                    "role": "user"
+                }
+            ],
+            "output_text": "This image is a simple, stylized illustration of a face, likely representing a character from a cartoon or animation. The face is composed of several geometric shapes on",
+            "request_idx": 0
+        }
+    ]
+}

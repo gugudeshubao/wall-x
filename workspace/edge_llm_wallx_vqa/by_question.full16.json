@@ -1,0 +1,36 @@
+{
+  "models": [
+    {
+      "model_name": "qwen25vl3b",
+      "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+      "questions": {
+        "Describe what you see in this image.": {
+          "n": 8,
+          "mean_latency_ms": 7464.476669716532,
+          "mean_similarity": 0.37616817637985833
+        },
+        "What objects are on the table?": {
+          "n": 8,
+          "mean_latency_ms": 7513.001157509279,
+          "mean_similarity": 0.35106874434959484
+        }
+      }
+    },
+    {
+      "model_name": "qwen3vl2b",
+      "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+      "questions": {
+        "Describe what you see in this image.": {
+          "n": 8,
+          "mean_latency_ms": 5453.284834002261,
+          "mean_similarity": 0.36837421680592364
+        },
+        "What objects are on the table?": {
+          "n": 8,
+          "mean_latency_ms": 5452.64087288524,
+          "mean_similarity": 0.4399177400009809
+        }
+      }
+    }
+  ]
+}

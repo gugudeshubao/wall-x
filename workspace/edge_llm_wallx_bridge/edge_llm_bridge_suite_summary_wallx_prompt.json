@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "name": "qwen25vl3b",
+      "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+      "mean_ms": 7703.720798017457,
+      "min_ms": 7703.720798017457,
+      "max_ms": 7703.720798017457,
+      "exact_match": null,
+      "normalized_match": null
+    },
+    {
+      "name": "qwen3vl2b",
+      "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+      "mean_ms": 5457.29199599009,
+      "min_ms": 5457.29199599009,
+      "max_ms": 5457.29199599009,
+      "exact_match": null,
+      "normalized_match": null
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "image": "fruits_on_table.png",
+  "question": "Describe what you see in this image.",
+  "reference_answer": "The image features a minimalist composition with a brown background. In the center, there are three distinct shapes",
+  "reference_latency_ms": 3326.8,
+  "edge_latency_ms": 4976.535908062942,
+  "edge_output_text": "This image is a simple, minimalist graphic composed of several geometric shapes on a two-tone background. The",
+  "similarity": 0.4732142857142857,
+  "formatted_complete_request": "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>Describe what you see in this image.<|im_end|>\n<|im_start|>assistant\n",
+  "system_prompt": "",
+  "max_new_tokens": 20
+}

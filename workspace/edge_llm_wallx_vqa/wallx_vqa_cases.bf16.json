@@ -1,0 +1,151 @@
+{
+  "source_json": "data/int8_vqa_results_orin.json",
+  "bucket": "bf16",
+  "num_cases": 16,
+  "cases": [
+    {
+      "case_id": "00_blocks_and_plates",
+      "image": "blocks_and_plates.png",
+      "question": "Describe what you see in this image.",
+      "reference_answer": "The image features a simple, flat design with a light blue background. At the center, there are",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3251.6,
+      "reference_tok_per_s": 6.15
+    },
+    {
+      "case_id": "01_blocks_and_plates",
+      "image": "blocks_and_plates.png",
+      "question": "What objects are on the table?",
+      "reference_answer": "<think>First, I observe the objects on the table. There are three distinct shapes: a",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3279.3,
+      "reference_tok_per_s": 6.1
+    },
+    {
+      "case_id": "02_dual_arm_robot",
+      "image": "dual_arm_robot.png",
+      "question": "Describe what you see in this image.",
+      "reference_answer": "The image depicts a minimalist composition featuring a light blue background with a brown rectangular base. On the base",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3272.4,
+      "reference_tok_per_s": 6.11
+    },
+    {
+      "case_id": "03_dual_arm_robot",
+      "image": "dual_arm_robot.png",
+      "question": "What objects are on the table?",
+      "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3203.5,
+      "reference_tok_per_s": 6.24
+    },
+    {
+      "case_id": "04_fruits_on_table",
+      "image": "fruits_on_table.png",
+      "question": "Describe what you see in this image.",
+      "reference_answer": "The image features a minimalist composition with a brown background. In the center, there are three distinct shapes",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3326.8,
+      "reference_tok_per_s": 6.01
+    },
+    {
+      "case_id": "05_fruits_on_table",
+      "image": "fruits_on_table.png",
+      "question": "What objects are on the table?",
+      "reference_answer": "<think>First, I observe the scene to identify the objects on the table. There are three",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3228.4,
+      "reference_tok_per_s": 6.19
+    },
+    {
+      "case_id": "06_real_tabletop_1",
+      "image": "real_tabletop_1.jpg",
+      "question": "Describe what you see in this image.",
+      "reference_answer": "On the floor, there is an open book with dried flowers, which is a custom photo book.",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3271.0,
+      "reference_tok_per_s": 6.11
+    },
+    {
+      "case_id": "07_real_tabletop_1",
+      "image": "real_tabletop_1.jpg",
+      "question": "What objects are on the table?",
+      "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3245.9,
+      "reference_tok_per_s": 6.16
+    },
+    {
+      "case_id": "08_real_tabletop_2",
+      "image": "real_tabletop_2.jpg",
+      "question": "Describe what you see in this image.",
+      "reference_answer": "The image features a black dog, likely a Labrador Retriever, lying on a weathered wooden",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3249.5,
+      "reference_tok_per_s": 6.15
+    },
+    {
+      "case_id": "09_real_tabletop_2",
+      "image": "real_tabletop_2.jpg",
+      "question": "What objects are on the table?",
+      "reference_answer": "<think>First, I observe the scene to identify any objects on the table. The table appears",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3235.5,
+      "reference_tok_per_s": 6.18
+    },
+    {
+      "case_id": "10_real_tabletop_3",
+      "image": "real_tabletop_3.jpg",
+      "question": "Describe what you see in this image.",
+      "reference_answer": "In a wooden bowl, there is a pile of green beans.",
+      "reference_tokens": 14,
+      "reference_latency_ms": 2498.8,
+      "reference_tok_per_s": 5.6
+    },
+    {
+      "case_id": "11_real_tabletop_3",
+      "image": "real_tabletop_3.jpg",
+      "question": "What objects are on the table?",
+      "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3213.4,
+      "reference_tok_per_s": 6.22
+    },
+    {
+      "case_id": "12_robot_gripper",
+      "image": "robot_gripper.png",
+      "question": "Describe what you see in this image.",
+      "reference_answer": "The image depicts a minimalist, computer-generated scene set against a solid blue background. Dominating the center",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3209.5,
+      "reference_tok_per_s": 6.23
+    },
+    {
+      "case_id": "13_robot_gripper",
+      "image": "robot_gripper.png",
+      "question": "What objects are on the table?",
+      "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3233.2,
+      "reference_tok_per_s": 6.19
+    },
+    {
+      "case_id": "14_stacking_task",
+      "image": "stacking_task.png",
+      "question": "Describe what you see in this image.",
+      "reference_answer": "The image displays a simple geometric composition against a solid blue background. There are four blocks of different colors",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3197.6,
+      "reference_tok_per_s": 6.25
+    },
+    {
+      "case_id": "15_stacking_task",
+      "image": "stacking_task.png",
+      "question": "What objects are on the table?",
+      "reference_answer": "<think>First, I observe the scene to identify any objects on the table. The image shows",
+      "reference_tokens": 20,
+      "reference_latency_ms": 3209.8,
+      "reference_tok_per_s": 6.23
+    }
+  ]
+}

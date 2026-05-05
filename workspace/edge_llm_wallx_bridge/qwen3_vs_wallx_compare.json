@@ -1,0 +1,9 @@
+{
+  "reference_json": "workspace/edge_llm_wallx_bridge/wallx_fruits_on_table_reference.json",
+  "candidate_json": "workspace/edge_llm_wallx_bridge/qwen3_wallx_prompt_output.json",
+  "reference_text": "The image features a minimalist composition with a brown background. In the center, there are three distinct shapes",
+  "candidate_text": "This image is a simple, stylized illustration of a face, likely representing a character from a cartoon or animation. The face is composed of several geometric shapes on",
+  "exact_match": false,
+  "normalized_match": false,
+  "ratio": 0.31690140845070425
+}

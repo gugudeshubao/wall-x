@@ -1,0 +1,14 @@
+[
+  {
+    "name": "qwen25vl3b",
+    "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+    "engine_dir": "/data/wy/wall-x/workspace/edge_llm_exp/edge_engines/qwen2.5-vl-3b",
+    "visual_engine_dir": "/data/wy/wall-x/workspace/edge_llm_exp/edge_engines/qwen2.5-vl-3b/visual"
+  },
+  {
+    "name": "qwen3vl2b",
+    "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+    "engine_dir": "/data/wy/wall-x/workspace/edge_llm_exp/edge_engines/qwen3-vl-2b",
+    "visual_engine_dir": "/data/wy/wall-x/workspace/edge_llm_exp/edge_engines/qwen3-vl-2b/visual"
+  }
+]

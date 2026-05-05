@@ -1,0 +1,207 @@
+{
+  "models": [
+    {
+      "model_name": "qwen3vl2b",
+      "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+      "num_cases": 16,
+      "mean_latency_ms": 5148.08069467108,
+      "mean_similarity": 0.47255850344857714,
+      "system_prompt": "",
+      "use_reference_token_length": true,
+      "cases": [
+        {
+          "case_id": "00_blocks_and_plates",
+          "image": "blocks_and_plates.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image features a simple, flat design with a light blue background. At the center, there are",
+          "candidate_answer": "This image displays a collection of geometric shapes arranged on a solid blue background. The shapes are organized into",
+          "latency_ms": 6803.00598195754,
+          "similarity": 0.45794392523364486,
+          "reference_latency_ms": 3251.6,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "01_blocks_and_plates",
+          "image": "blocks_and_plates.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the objects on the table. There are three distinct shapes: a",
+          "candidate_answer": "Based on the image provided, there are three objects on the table. They are all three-dimensional shapes",
+          "latency_ms": 5104.277575970627,
+          "similarity": 0.648936170212766,
+          "reference_latency_ms": 3279.3,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "02_dual_arm_robot",
+          "image": "dual_arm_robot.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image depicts a minimalist composition featuring a light blue background with a brown rectangular base. On the base",
+          "candidate_answer": "This image displays a stylized, minimalist illustration of a robot's head, rendered in a flat,",
+          "latency_ms": 5039.921574993059,
+          "similarity": 0.4507042253521127,
+          "reference_latency_ms": 3272.4,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "03_dual_arm_robot",
+          "image": "dual_arm_robot.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+          "candidate_answer": "Based on the image provided, the objects on the table are:\n\n- A robot with two arms and",
+          "latency_ms": 5060.821121907793,
+          "similarity": 0.5257142857142857,
+          "reference_latency_ms": 3203.5,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "04_fruits_on_table",
+          "image": "fruits_on_table.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image features a minimalist composition with a brown background. In the center, there are three distinct shapes",
+          "candidate_answer": "This image is a simple, minimalist graphic composed of several geometric shapes on a two-tone background. The",
+          "latency_ms": 5024.9615859938785,
+          "similarity": 0.4732142857142857,
+          "reference_latency_ms": 3326.8,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "05_fruits_on_table",
+          "image": "fruits_on_table.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. There are three",
+          "candidate_answer": "Based on the image provided, the objects on the table are:\n\n- A red apple\n- An",
+          "latency_ms": 5024.192710989155,
+          "similarity": 0.573170731707317,
+          "reference_latency_ms": 3228.4,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "06_real_tabletop_1",
+          "image": "real_tabletop_1.jpg",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "On the floor, there is an open book with dried flowers, which is a custom photo book.",
+          "candidate_answer": "This is a top-down photograph of a wooden surface with several objects arranged on it. The scene is",
+          "latency_ms": 5044.124958920293,
+          "similarity": 0.32608695652173914,
+          "reference_latency_ms": 3271.0,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "07_real_tabletop_1",
+          "image": "real_tabletop_1.jpg",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+          "candidate_answer": "Based on the image provided, the following objects are on the table:\n\n- An open book, which",
+          "latency_ms": 5044.0805240068585,
+          "similarity": 0.49162011173184356,
+          "reference_latency_ms": 3245.9,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "08_real_tabletop_2",
+          "image": "real_tabletop_2.jpg",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image features a black dog, likely a Labrador Retriever, lying on a weathered wooden",
+          "candidate_answer": "This is a top-down photograph of a young, black puppy lying on a weathered wooden floor.",
+          "latency_ms": 5042.715191026218,
+          "similarity": 0.48863636363636365,
+          "reference_latency_ms": 3249.5,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "09_real_tabletop_2",
+          "image": "real_tabletop_2.jpg",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify any objects on the table. The table appears",
+          "candidate_answer": "Based on the image provided, there are no objects on the table. The image shows a black puppy",
+          "latency_ms": 5049.400334013626,
+          "similarity": 0.5604395604395604,
+          "reference_latency_ms": 3235.5,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "10_real_tabletop_3",
+          "image": "real_tabletop_3.jpg",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "In a wooden bowl, there is a pile of green beans.",
+          "candidate_answer": "This image captures a close-up view of a large pile of fresh,",
+          "latency_ms": 4961.62407391239,
+          "similarity": 0.34545454545454546,
+          "reference_latency_ms": 2498.8,
+          "max_generate_length": 14,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "11_real_tabletop_3",
+          "image": "real_tabletop_3.jpg",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+          "candidate_answer": "Based on the image provided, the objects on the table are:\n\n- A large pile of fresh green",
+          "latency_ms": 5067.495828028768,
+          "similarity": 0.5310734463276836,
+          "reference_latency_ms": 3213.4,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "12_robot_gripper",
+          "image": "robot_gripper.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image depicts a minimalist, computer-generated scene set against a solid blue background. Dominating the center",
+          "candidate_answer": "This image is a simple, flat-style graphic with a minimalist design. It features a vertical, dark",
+          "latency_ms": 5065.067871939391,
+          "similarity": 0.4056603773584906,
+          "reference_latency_ms": 3209.5,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "13_robot_gripper",
+          "image": "robot_gripper.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify the objects on the table. The table appears",
+          "candidate_answer": "Based on the image provided, the objects on the table are:\n\n- A red circular object, which",
+          "latency_ms": 4999.562030076049,
+          "similarity": 0.4943820224719101,
+          "reference_latency_ms": 3233.2,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "14_stacking_task",
+          "image": "stacking_task.png",
+          "question": "Describe what you see in this image.",
+          "reference_answer": "The image displays a simple geometric composition against a solid blue background. There are four blocks of different colors",
+          "candidate_answer": "This image displays a simple, abstract composition of five colored squares arranged horizontally on a solid blue background.",
+          "latency_ms": 5018.676207982935,
+          "similarity": 0.5806451612903226,
+          "reference_latency_ms": 3197.6,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        },
+        {
+          "case_id": "15_stacking_task",
+          "image": "stacking_task.png",
+          "question": "What objects are on the table?",
+          "reference_answer": "<think>First, I observe the scene to identify any objects on the table. The image shows",
+          "candidate_answer": "Based on the image provided, there are several geometric shapes, specifically squares, arranged on a flat,",
+          "latency_ms": 5019.363543018699,
+          "similarity": 0.20725388601036268,
+          "reference_latency_ms": 3209.8,
+          "max_generate_length": 20,
+          "system_prompt": ""
+        }
+      ]
+    }
+  ]
+}

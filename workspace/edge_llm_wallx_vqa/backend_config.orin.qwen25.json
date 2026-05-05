@@ -1,0 +1,13 @@
+{
+  "build_dir": "/data/wy/wall-x/workspace/edge_llm_exp/TensorRT-Edge-LLM/build_orin",
+  "engine_dir": "/data/wy/wall-x/workspace/edge_llm_exp/edge_engines/qwen2.5-vl-3b",
+  "multimodal_engine_dir": "/data/wy/wall-x/workspace/edge_llm_exp/edge_engines/qwen2.5-vl-3b/visual",
+  "plugin_path": "/data/wy/wall-x/workspace/edge_llm_exp/TensorRT-Edge-LLM/build_orin/libNvInfer_edgellm_plugin.so",
+  "work_root": "/data/wy/wall-x/workspace/edge_llm_wallx_vqa/runtime_tmp",
+  "compat_mode": "wallx_vqa",
+  "system_prompt": "You are a helpful assistant.",
+  "max_new_tokens": 20,
+  "hf_home": "/data/wy/hf_cache",
+  "hf_endpoint": "https://hf-mirror.com",
+  "venv_bin": "/data/wy/wall-x/workspace/edge_llm_exp/venv_edge/bin"
+}

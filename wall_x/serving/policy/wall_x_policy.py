@@ -7,6 +7,7 @@ from wall_x.serving.websocket_policy_server import BasePolicy
 from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl_act import Qwen2_5_VLMoEForAction
 from wall_x.serving.policy.utils import prepare_batch
 from wall_x.model.model_utils import load_wallx_processors, register_normalizers
+from wall_x.serving.vqa_backend import build_vqa_backend
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,8 @@ class WallXPolicy(BasePolicy):
         max_pixels: int = 16384 * 28 * 28,
         image_factor: int = 28,
         max_length: int = 2048,
+        backend: str = "wallx",
+        edge_backend_config: str | None = None,
     ):
         """Initialize the Wall-X policy.
 
@@ -82,6 +85,8 @@ class WallXPolicy(BasePolicy):
         self.max_pixels = max_pixels
         self.image_factor = image_factor
         self.max_length = max_length
+        self.backend = backend
+        self.edge_backend_config = edge_backend_config
 
         print("predict_mode", predict_mode)
         print("camera_key", camera_key)
@@ -91,6 +96,15 @@ class WallXPolicy(BasePolicy):
 
         processors_dict = load_wallx_processors(train_config)
         self.processor = processors_dict["processor"]
+
+        self.vqa_backend = None
+        if self.backend == "edge":
+            if not self.edge_backend_config:
+                raise ValueError("edge backend requires edge_backend_config")
+            self.vqa_backend = build_vqa_backend(
+                backend="edge",
+                edge_backend_config=self.edge_backend_config,
+            )
 
         # Action buffer for multi-step predictions
         self.action_buffer = []
@@ -132,6 +146,20 @@ class WallXPolicy(BasePolicy):
                 - Additional metadata
         """
         try:
+            if self.backend == "edge":
+                image = obs.get("image", None)
+                if image is None:
+                    if self.camera_key:
+                        image = obs.get(self.camera_key[0], None)
+                if image is None:
+                    raise ValueError("Edge backend expects an 'image' field or the first camera_key in obs")
+                question = obs.get("prompt", self.default_prompt or "")
+                result = self.vqa_backend.generate_with_metadata(image, question)
+                return {
+                    "predict_action": None,
+                    "vqa": result,
+                }
+
             # Need to predict new actions
             input_batch = prepare_batch(
                 obs,
