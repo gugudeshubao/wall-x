@@ -20,11 +20,13 @@ from pathlib import Path
 
 DEFAULT_REPO_ROOT = Path("/data/wy/wall-x/workspace/edge_llm_exp/TensorRT-Edge-LLM")
 DEFAULT_WORK_ROOT = Path("/data/wy/wall-x/workspace/edge_llm_exp")
+DEFAULT_PYTHON_BIN = Path("/data/wy/wall-x/venv/bin/python")
 
 
-def make_env(repo_root: Path) -> dict[str, str]:
+def make_env(repo_root: Path, python_bin: Path) -> dict[str, str]:
     e = os.environ.copy()
-    e["PATH"] = "/data/wy/wall-x/workspace/edge_llm_exp/venv_edge/bin:" + e.get("PATH", "")
+    python_dir = str(python_bin.parent)
+    e["PATH"] = python_dir + ":" + e.get("PATH", "")
     e["HOME"] = "/data/wy/hf_home"
     e["XDG_CACHE_HOME"] = "/data/wy/hf_home/.cache"
     e["HF_HOME"] = "/data/wy/hf_cache"
@@ -32,6 +34,7 @@ def make_env(repo_root: Path) -> dict[str, str]:
     e["HF_ENDPOINT"] = "https://hf-mirror.com"
     e["HF_HUB_ETAG_TIMEOUT"] = "60"
     e["HF_HUB_DOWNLOAD_TIMEOUT"] = "120"
+    e["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
     e["EDGELLM_PLUGIN_PATH"] = str(repo_root / "build_orin" / "libNvInfer_edgellm_plugin.so")
     return e
 
@@ -70,9 +73,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark one Edge-LLM VLM model on Orin")
     parser.add_argument("--repo-root", default=str(DEFAULT_REPO_ROOT))
     parser.add_argument("--work-root", default=str(DEFAULT_WORK_ROOT))
+    parser.add_argument("--python-bin", default=str(DEFAULT_PYTHON_BIN))
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--model-name", required=True)
     parser.add_argument("--visual-model-id", default="", help="Use a different checkpoint for visual export if needed.")
+    parser.add_argument(
+        "--export-tool",
+        default="tensorrt_edgellm",
+        choices=["tensorrt_edgellm", "llm_loader"],
+        help="Which export pipeline to use before building engines.",
+    )
     parser.add_argument("--export-device", default="cpu", choices=["cpu", "cuda"], help="Device used for ONNX export.")
     parser.add_argument("--image", default="/data/wy/wall-x/test_images/fruits_on_table.png")
     parser.add_argument("--prompt", default="Please describe the image.")
@@ -83,13 +93,18 @@ def main() -> None:
     repo_root = Path(args.repo_root)
     build_dir = repo_root / "build_orin"
     work_root = Path(args.work_root)
-    env = make_env(repo_root)
+    python_bin = Path(args.python_bin)
+    env = make_env(repo_root, python_bin)
 
     visual_model_id = args.visual_model_id or args.model_id
 
     onnx_root = work_root / "work_onnx" / args.model_name
-    llm_onnx_dir = onnx_root
-    visual_onnx_dir = onnx_root / "visual_enc_onnx"
+    if args.export_tool == "llm_loader":
+        llm_onnx_dir = onnx_root / "llm"
+        visual_onnx_dir = onnx_root / "visual"
+    else:
+        llm_onnx_dir = onnx_root
+        visual_onnx_dir = onnx_root / "visual_enc_onnx"
     engine_root = work_root / "edge_engines" / args.model_name
     input_json = work_root / f"input_vlm_{args.model_name}.json"
     output_json = work_root / f"output_vlm_{args.model_name}.json"
@@ -101,37 +116,71 @@ def main() -> None:
 
     llm_onnx = llm_onnx_dir / "model.onnx"
     if not llm_onnx.exists():
-        run(
-            [
-                "tensorrt-edgellm-export-llm",
-                "--model_dir",
-                args.model_id,
-                "--output_dir",
-                str(llm_onnx_dir),
-                "--device",
-                args.export_device,
-            ],
-            cwd=repo_root,
-            env=env,
-        )
+        if args.export_tool == "llm_loader":
+            run(
+                [
+                    str(python_bin),
+                    "-m",
+                    "llm_loader.export_all_cli",
+                    args.model_id,
+                    str(onnx_root),
+                    "--skip-audio",
+                    "--skip-code2wav",
+                    "--dtype",
+                    "fp16",
+                ],
+                cwd=repo_root / "experimental",
+                env=env,
+            )
+        else:
+            run(
+                [
+                    str(python_bin),
+                    "-m",
+                    "tensorrt_edgellm.scripts.export_llm",
+                    "--model_dir",
+                    args.model_id,
+                    "--output_dir",
+                    str(llm_onnx_dir),
+                    "--device",
+                    args.export_device,
+                ],
+                cwd=repo_root,
+                env=env,
+            )
     else:
         print(f"[SKIP] existing llm onnx: {llm_onnx}", flush=True)
 
+    if args.export_tool == "llm_loader":
+        root_cfg = onnx_root / "config.json"
+        src_cfg = llm_onnx_dir / "config.json"
+        if src_cfg.exists():
+            import shutil
+            shutil.copy2(src_cfg, root_cfg)
+            print(f"[COPY] {src_cfg} -> {root_cfg}", flush=True)
+
     visual_onnx = visual_onnx_dir / "model.onnx"
     if not visual_onnx.exists():
-        run(
-            [
-                "tensorrt-edgellm-export-visual",
-                "--model_dir",
-                visual_model_id,
-                "--output_dir",
-                str(visual_onnx_dir),
-                "--device",
-                args.export_device,
-            ],
-            cwd=repo_root,
-            env=env,
-        )
+        if args.export_tool == "llm_loader":
+            # llm_loader.export_all_cli already exports the visual encoder into
+            # <output_dir>/visual/model.onnx for VLMs.
+            pass
+        else:
+            run(
+                [
+                    str(python_bin),
+                    "-m",
+                    "tensorrt_edgellm.scripts.export_visual",
+                    "--model_dir",
+                    visual_model_id,
+                    "--output_dir",
+                    str(visual_onnx_dir),
+                    "--device",
+                    args.export_device,
+                ],
+                cwd=repo_root,
+                env=env,
+            )
     else:
         print(f"[SKIP] existing visual onnx: {visual_onnx}", flush=True)
 

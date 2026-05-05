@@ -119,8 +119,18 @@
 推荐：
 
 - **VQA：默认继续走 `cpp_infer`**
+- **VQA 的 Edge-LLM 侧优先做成 `edge_router`**
+  - `Describe ...` → `Qwen2.5-VL-3B`
+  - `What objects ...` → `Qwen3-VL-2B`
 - **Flow：默认继续走 `cpp_infer` 或手工 TRT / TRT-LLM`**
 - **Edge-LLM：作为可切 backend / router 保留，不整体替换默认路径**
+
+对主工程服务层来说，当前已经可以明确：
+
+- `wall_x.serving.VQAPolicy(backend=edge)` 已经可切到 Edge-LLM VQA
+- `wall_x.serving` 里的 `WallXPolicy` 也已经能在 `backend=edge` 下把观测里的 `image` / `camera_key[0]` 交给 Edge-LLM
+- 这说明 **VQA 的 Edge-LLM 路线已经足够进入主工程入口**
+- 但 `Flow` 还没有同样的服务层入口收口，当前更自然的下一步仍然是把 `edge_llm_wallx_flow` 这条 custom bridge 接入 service / policy 层，而不是继续深挖 VQA 量化
 
 ### 3.2 如果目标是“继续压端到端性能”
 
@@ -144,3 +154,34 @@
 ## 4. 最短版本
 
 > **VQA 不要急着替换掉 `cpp_infer`；Flow 应该继续投 TRT / Edge custom runtime；`TensorRT-Edge-LLM` 值得用，但它当前在 wall-x 上最合理的角色是“VQA 的官方 edge backend 候选 + Flow 的 custom bridge 后端”，不是直接替代整套 wall-x runtime。**
+
+## 5. 量化路线补充
+
+AWQ 这条线现在可以停掉，不继续深挖：
+
+- 首 token 已经直接塌到 `<|im_end|>`
+- 第一层 `q/k/v` 没坏
+- 第一层 `MLP` 已经塌成 0
+
+后续更值得试的是官方量化主路：
+
+- `fp8`
+- `nvfp4`
+- `mxfp8`
+- `int8_sq`
+
+而不是继续在 `Qwen2.5-VL-3B-Instruct-AWQ` 上修补。
+
+## 6. int8_sq 结果
+
+`Qwen3-VL-2B-Instruct + int8_sq` 已经在 Orin 上实测跑通：
+
+- 量化 checkpoint 成功导出
+- `llm_loader` LLM / visual ONNX 成功导出
+- `llm_build` / `visual_build` 成功
+- `llm_inference` 成功
+- 单次 VQA wall-clock: **6245.258 ms**
+
+这说明：
+
+> **官方量化主路在 Orin 上是可用的，但它仍然更像官方 edge runtime 路线，而不是直接把 wall-x 的 VQA 压成最优时延。**

@@ -1613,6 +1613,33 @@ Orin 上已经实际完成：
 
 > **AWQ VLM 不再只是环境问题，也不再只是 repack 问题。当前已经能导出 ONNX、能 build `llm.engine`、能加载 runtime、也能承接 prefill；但 runtime 级 `DEBUG_TOP1/DEBUG_TOPK`、随机采样，以及 checkpoint 侧第一层 `q/k/v` 对照已经共同说明：问题不在 sampling，也不在第一层输入投影，而是在更深层的量化后 logits 生成链。**
 
+进一步的官方量化主路探索结果是：
+
+- `fp8`
+  - 量化成功
+  - `llm_loader` ONNX 导出成功
+  - 但在 Orin 上 `llm_build` 会直接报：
+    - `Networks with FP8 Q/DQ layers require hardware with FP8 support.`
+  - 这是 **硬件能力边界**
+
+- `int8_sq`
+  - 量化 checkpoint 成功导出
+  - `llm_loader` LLM / visual ONNX 成功导出
+  - `llm_build` / `visual_build` 成功
+  - `llm_inference` 成功
+  - `Qwen3-VL-2B + int8_sq` 单次 VQA wall-clock：
+    - **`6245.258 ms`**
+
+所以当前更准确的判断是：
+
+> **官方量化主路在 Orin 上是可用的，但 `fp8` 会撞到硬件不支持，`int8_sq` 能跑通却仍然明显慢于 wall-x 当前的 `cpp_infer` VQA baseline。**
+
+这一轮量化线可以直接收口成三句：
+
+- **AWQ**：结构上能跑，但生成链坏了，首 token 直接塌到 EOS
+- **FP8**：导出能通，但 Orin 上 `llm_build` 明确报硬件不支持
+- **INT8-SQ**：能跑通，但仍是秒级，没打过 `cpp_infer`
+
 ### 10.2 Flow Action
 
 - 保留手工 TRT / TRT-LLM

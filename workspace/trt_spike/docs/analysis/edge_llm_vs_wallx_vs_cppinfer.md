@@ -865,6 +865,20 @@ one_single_engine.engine
 
 > **Edge-LLM 的 VQA 量化路线值得继续，但在当前 Orin 上，我们还没有拿到 AWQ VLM 的最终 wall-clock；当前新的主阻塞已经不是 repack，而是“如何让 AWQ 导出生成可承接 prefill 的 LLM 图”。**
 
+### 7.8 官方量化主路：`Qwen3-VL-2B + int8_sq`
+
+这条路线已经在 Orin 上完整跑通：
+
+- 量化 checkpoint 成功导出
+- `llm_loader` LLM / visual ONNX 成功导出
+- `llm_build` / `visual_build` 成功
+- `llm_inference` 成功
+- 单次 VQA wall-clock: **6245.258 ms**
+
+这说明：
+
+> **官方量化主路在 Orin 上是可用的，但它仍然更像官方 edge runtime 路线，而不是直接把 wall-x 的 VQA 压成最优时延。**
+
 ### 7.6 最终建议
 
 - **VQA**：优先保留 `cpp_infer` 作为最稳基线，Edge-LLM 作为可选 backend / router 候选。

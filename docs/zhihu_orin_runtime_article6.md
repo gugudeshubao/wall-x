@@ -338,6 +338,33 @@ Flow Action 之所以能通过 custom bridge 跑到 Edge-LLM 上，不是因为�
 - 接下来最值钱的是短链、dispatch、graph、cache、serving
 - 而不是继续盲目追一个“看起来更激进”的 checkpoint
 
+这段话再落到主工程入口上，意思也已经很明确：
+
+- `wall_x.serving.VQAPolicy(backend=edge)` 已经可以直接切到 Edge-LLM
+- `wall_x.serving.WallXPolicy` 也已经能在 `backend=edge` 下把观测里的图像交给 Edge-LLM
+- 所以 **VQA 的 Edge-LLM 侧已经足够进入主工程入口**
+- 但 `Flow` 还没有同样成熟的服务层收口，所以下一步更自然的投入点仍然是把 `edge_llm_wallx_flow` 这条 custom bridge 接入 `wall_x.serving`，而不是继续深挖 VQA 量化
+
+### 4.3 官方量化主路也试了，结论更直接
+
+我们后来又补试了两条官方量化主路：
+
+- `fp8`
+  - 量化和 `llm_loader` 导出都成功
+  - 但 `llm_build` 在 Orin 上直接报：
+    - `Networks with FP8 Q/DQ layers require hardware with FP8 support.`
+  - 这不是脚本问题，是 **硬件边界**
+
+- `int8_sq`
+  - `Qwen3-VL-2B + int8_sq` 已经完整跑通
+  - 单次 VQA wall-clock：**6245.258 ms**
+
+所以 VQA 量化这条线最后收敛成了三个很清楚的判断：
+
+- **AWQ**：结构上能跑，但生成链坏了
+- **FP8**：导出能通，但 Orin 硬件不支持 build
+- **INT8-SQ**：能跑通，但仍然没有把 wall-x 的 VQA 压到最优时延
+
 ---
 
 ## 五、所以最后该怎么选
