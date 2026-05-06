@@ -10,6 +10,11 @@ The serving infrastructure consists of three main components:
 2. **WallXPolicy** (`wall_x/serving/policy/wall_x_policy.py`): Policy wrapper that adapts the Wall-X model to the `BasePolicy` interface
 3. **launch_serving.py**: Main script for starting the server with various configurations
 
+For the Edge-LLM custom Flow bridge, there is now also:
+
+4. **FlowPolicy** (`wall_x/serving/flow_policy.py`): Minimal serving wrapper around the `edge_llm_wallx_flow` custom bridge
+5. **launch_flow_serving.py**: Main script for starting a websocket Flow bridge server
+
 ## Quick Start
 
 ### Basic Usage
@@ -23,6 +28,18 @@ python -m wall_x.serving.launch_serving \
   --model-config.model-path /path/to/libero_model_stuff \
   --model-config.action-tokenizer-path /path/to/fast/ \
   --model-config.train-config-path /path/to/config.yml
+```
+
+### Flow Bridge Usage
+
+Serve the TensorRT-Edge-LLM custom Flow bridge on Orin:
+
+```bash
+python -m wall_x.serving.launch_flow_serving \
+  --engine-dir /data/wy/wall-x/workspace/edge_llm_exp/edge_engines/wallx_flow_action_step \
+  --ref-path /data/wy/wall-x/workspace/trt_spike/tmp/flow_dummy_1/flow_dummy_reference.safetensors \
+  --model-path /data/wy/models/wall-oss-flow \
+  --port 8001
 ```
 
 ### Specify Environment

@@ -15,6 +15,7 @@ Files:
 - `export_wallx_action_onnx.py`
 - `build_wallx_action_engine.py`
 - `run_wallx_action_engine.py`
+- `flow_policy_bridge.py`
 - `run_wallx_action_orin.sh`
 
 Results:
@@ -34,6 +35,12 @@ Instead, it does:
 2. build an `action.engine` with Edge-LLM `action_build`
 3. run that engine with a custom runner
 4. keep the outer Euler loop on host
+
+It now also has a minimal serving adapter:
+
+- `workspace/edge_llm_wallx_flow/flow_policy_bridge.py`
+- `wall_x/serving/flow_policy.py`
+- `wall_x/serving/launch_flow_serving.py`
 
 ## Requirements on Orin
 
