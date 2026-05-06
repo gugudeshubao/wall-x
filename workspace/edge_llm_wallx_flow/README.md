@@ -13,6 +13,7 @@ Current status:
 
 Files:
 - `export_wallx_action_onnx.py`
+- `quantize_wallx_action_onnx.py`
 - `build_wallx_action_engine.py`
 - `run_wallx_action_engine.py`
 - `flow_policy_bridge.py`
@@ -41,6 +42,26 @@ It now also has a minimal serving adapter:
 - `workspace/edge_llm_wallx_flow/flow_policy_bridge.py`
 - `wall_x/serving/flow_policy.py`
 - `wall_x/serving/launch_flow_serving.py`
+
+It also has a first INT8 experiment path:
+
+- `quantize_wallx_action_onnx.py`
+  - post-export INT8 QDQ quantization of the custom wall-x action ONNX
+  - this is **not** the official Edge-LLM `export_action` path
+  - it is the first custom attempt to see whether `action_build` can consume an INT8-ish graph
+  - current result:
+    - quantized ONNX can be produced
+    - but `action_build` rejects `DynamicQuantizeLinear` / `MatMulInteger`
+
+It now also has a second, more promising custom INT8-SQ path:
+
+- `export_wallx_action_int8sq_onnx.py`
+  - custom INT8-SQ QDQ export using the same `trt::int8_sq_*` custom ops that Edge-LLM uses in `llm_loader`
+  - this one **does** build with `action_build`
+  - current result on Orin:
+    - `action_step_ms_mean = 15.374`
+    - `flow_total_ms_mean = 77.866`
+    - but `flow_final_cosine = 0.27758002`, so accuracy is far too low for practical use
 
 ## Minimal websocket serving smoke
 

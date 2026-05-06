@@ -113,6 +113,33 @@ So the practical conclusion is:
 
 > **VQA/VLM in Edge-LLM has a real quantization story; the current action-expert path used by this wall-x Flow bridge does not.**
 
+### First INT8 experiment status
+
+We also tried a first custom INT8 path on top of the custom Flow bridge:
+
+- post-export ONNX quantization with ONNX Runtime
+- dynamic INT8, `MatMul`-only, QDQ-style graph
+- output directory:
+  - `/data/wy/wall-x/workspace/edge_llm_exp/work_onnx/wallx_flow_action_step_int8dyn`
+
+Result:
+
+- the quantized ONNX was generated successfully
+- but `TensorRT-Edge-LLM action_build` rejected it
+
+The concrete failure was:
+
+- ONNX nodes such as:
+  - `DynamicQuantizeLinear`
+  - `MatMulInteger`
+- `action_build` / TensorRT parser failed in:
+  - `checkDynamicQuantizeLinear`
+  - `checkMatMulInteger`
+
+So the practical boundary is:
+
+> **For the current wall-x Flow custom bridge, a first INT8 QDQ / MatMulInteger attempt is not accepted by Edge-LLM `action_build`.**
+
 ## One-glance summary
 
 | Route | Flow Action latency | Note |
@@ -158,3 +185,39 @@ Smoke result on Orin (`ws://127.0.0.1:8795`):
 This means:
 
 > **The Edge-LLM Flow bridge has now reached wall_x.serving / websocket layer smoke-complete status on Orin.**
+
+## First INT8-SQ experiment
+
+We also attempted a first custom INT8-SQ path for the Flow bridge:
+
+- export path:
+  - `export_wallx_action_int8sq_onnx.py`
+- quantized ONNX output:
+  - `/data/wy/wall-x/workspace/edge_llm_exp/work_onnx/wallx_flow_action_step_int8sq/model.onnx`
+- build path:
+  - `TensorRT-Edge-LLM action_build`
+- runtime:
+  - existing custom runner from `run_wallx_action_engine.py`
+
+Result on Orin:
+
+- `action_step_ms = 15.473`
+- `denoised_vs_ref cosine = 0.99081051`
+- `denoised_vs_ref mean_abs = 1.65894449e-01`
+- `denoised_vs_ref max_abs = 7.19319820e-01`
+- `flow_final_cosine = 0.27758002`
+- `flow_final_mean_abs = 6.16935730e-01`
+- `flow_final_max_abs = 2.84748363e+00`
+- `flow_total_ms = 89.122`
+- `flow_step_ms_mean = 15.362`
+- `flow_step_ms_std = 0.064`
+
+Warm benchmark on Orin (`--warmup 0 --iters 1`):
+
+- `action_step_ms_mean = 15.374`
+- `flow_step_ms_mean = 15.360`
+- `flow_total_ms_mean = 77.866`
+
+This tells us:
+
+> **The custom Flow INT8-SQ path is buildable and much faster, but the accuracy drops sharply enough that it is not yet a usable replacement for the FP16 bridge.**

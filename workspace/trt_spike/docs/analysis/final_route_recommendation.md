@@ -71,6 +71,20 @@
 
 > **Flow Action 现在最值得继续投的是“TRT/Edge custom runtime”方向，而不是期待 stock VLM runtime 直接吃掉 wall-x 控制链。**
 
+补充一条当前已经实测过的边界：
+
+- Flow 的第一版 custom `INT8-SQ` 路线已经能：
+  - 导出 ONNX
+  - `action_build`
+  - 跑通 runner
+- 但当前结果是：
+  - `flow_total_ms_mean = 77.866`
+  - `flow_final_cosine = 0.27758002`
+
+所以：
+
+> **Flow INT8-SQ 现在更像“证明这条量化链理论上可走”的实验，而不是能替代 FP16 custom bridge 的可用方案。**
+
 ## 2. 不要混淆的三条线
 
 ### 2.1 `cpp_infer`
@@ -195,3 +209,17 @@ AWQ 这条线现在可以停掉，不继续深挖：
 这说明：
 
 > **官方量化主路在 Orin 上是可用的，但它仍然更像官方 edge runtime 路线，而不是直接把 wall-x 的 VQA 压成最优时延。**
+
+同口径继续补一条：
+
+- `Qwen2.5-VL-3B-Instruct + int8_sq`
+  - 单次 VQA wall-clock: **8234.588 ms**
+
+所以这一轮同口径结果是：
+
+- `Qwen3-VL-2B + int8_sq`: `6245.258 ms`
+- `Qwen2.5-VL-3B + int8_sq`: `8234.588 ms`
+
+也就是说：
+
+> **更大的官方 VLM 模型在 Orin 上只会把量化 VQA 时延继续拉高，而不会自然逼近 wall-x 当前 VQA baseline。**
