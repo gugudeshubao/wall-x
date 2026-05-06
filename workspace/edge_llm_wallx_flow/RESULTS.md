@@ -126,3 +126,35 @@ So the practical conclusion is:
 - Keep `cpp_infer` as the clean baseline.
 - Keep hand TRT / TRT-LLM as the current stock TRT path.
 - Keep Edge-LLM custom bridge as the fastest Flow path, but treat it as a bridge, not the final stock runtime.
+
+## Serving smoke
+
+The Flow custom bridge is no longer only a benchmark script.
+
+On Orin we also verified a serving-layer smoke with:
+
+- `wall_x.serving.flow_policy.FlowPolicy`
+- `wall_x.serving.launch_flow_serving`
+- `wall_x.serving.websocket_policy_server.WebsocketPolicyServer`
+
+Smoke result on Orin (`ws://127.0.0.1:8795`):
+
+- metadata:
+  - `backend = edge_flow_bridge`
+  - `engine_dir = /data/wy/wall-x/workspace/edge_llm_exp/edge_engines/wallx_flow_action_step`
+- one websocket request succeeded
+- response keys:
+  - `action`
+  - `predict_action`
+  - `flow`
+  - `server_timing`
+- returned action shape:
+  - `(1, 32, 20)`
+- returned timing:
+  - `server_timing.infer_ms ≈ 214.29`
+  - `flow.flow_total_ms ≈ 212.86`
+  - `flow.flow_step_ms_mean ≈ 31.61`
+
+This means:
+
+> **The Edge-LLM Flow bridge has now reached wall_x.serving / websocket layer smoke-complete status on Orin.**

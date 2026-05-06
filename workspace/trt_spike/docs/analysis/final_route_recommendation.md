@@ -151,6 +151,16 @@
 - **不要假设 stock `llm_inference` 能直接吞掉 wall-x Flow**
 - **Flow 继续接受 custom bridge / self-runtime 是必要现实**
 
+### 3.4 当前已经落地的服务层事实
+
+- `wall_x.serving.VQAPolicy(backend=edge)` 已经可切到 Edge-LLM VQA
+- `wall_x.serving.FlowPolicy` 已经可以挂上 `edge_llm_wallx_flow`
+- `wall_x.serving.launch_flow_serving` 在 Orin 上已经完成最小 websocket smoke
+
+所以现在更准确的判断是：
+
+> **VQA 的 Edge-LLM 侧已经进入主工程入口，Flow 的 Edge-LLM custom bridge 也已经进入 `wall_x.serving` 服务层。**
+
 ## 4. 最短版本
 
 > **VQA 不要急着替换掉 `cpp_infer`；Flow 应该继续投 TRT / Edge custom runtime；`TensorRT-Edge-LLM` 值得用，但它当前在 wall-x 上最合理的角色是“VQA 的官方 edge backend 候选 + Flow 的 custom bridge 后端”，不是直接替代整套 wall-x runtime。**

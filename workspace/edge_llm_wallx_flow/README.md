@@ -42,6 +42,30 @@ It now also has a minimal serving adapter:
 - `wall_x/serving/flow_policy.py`
 - `wall_x/serving/launch_flow_serving.py`
 
+## Minimal websocket serving smoke
+
+On Orin, the Flow bridge can now be launched through `wall_x.serving`:
+
+```bash
+cd /data/wy/wall-x
+PYTHONPATH=/data/wy/wall-x:/home/dog/.local/lib/python3.10/site-packages:/data/wy/trtllm_test/TensorRT-LLM/build/lib:/data/wy/trtllm_test/TensorRT-LLM/cpp/build/tensorrt_llm \
+/usr/bin/python3 -m wall_x.serving.launch_flow_serving \
+  --engine-dir /data/wy/wall-x/workspace/edge_llm_exp/edge_engines/wallx_flow_action_step \
+  --ref-path /data/wy/wall-x/workspace/trt_spike/tmp/flow_dummy_1/flow_dummy_reference.safetensors \
+  --model-path /data/wy/models/wall-oss-flow \
+  --host 127.0.0.1 \
+  --port 8795
+```
+
+And a minimal websocket client request succeeds with:
+
+- metadata returned from the server
+- response keys:
+  - `action`
+  - `predict_action`
+  - `flow`
+  - `server_timing`
+
 ## Requirements on Orin
 
 - wall-x model path:
