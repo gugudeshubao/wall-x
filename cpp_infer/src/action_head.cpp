@@ -222,6 +222,9 @@ void ActionProcessor::load_weights(const WeightMap& weights, const std::string& 
 
     w1_weight_ = get("w1.weight");
     w2_weight_ = get("w2.weight");
+    w2_action_weight_ = w2_weight_.slice(/*dim=*/1, /*start=*/0, /*end=*/action_hidden_size_).contiguous();
+    w2_time_weight_ = w2_weight_.slice(/*dim=*/1, /*start=*/action_hidden_size_,
+                                       /*end=*/action_hidden_size_ * 2).contiguous();
     w3_weight_ = get("w3.weight");
     proj_back_weight_ = get("action_proj_back.weight");
 
@@ -246,37 +249,33 @@ torch::Tensor ActionProcessor::step(const torch::Tensor& timestep,
     // timestep: [batch]
     // dof_mask: [batch, 1, action_dim] or [batch, horizon, action_dim]
 
-    // Use float32 for action processing
-    auto action_f32 = noisy_action.to(torch::kFloat32);
-
     // Concatenate dof_mask with noisy_action: [batch, horizon, action_dim*2]
-    auto mask = dof_mask.to(torch::kFloat32);
-    if (mask.dim() == 3 && mask.size(1) == 1) {
-        mask = mask.expand({-1, action_f32.size(1), -1});
-    }
-    auto w1_input = torch::cat({action_f32, mask}, -1);
-    // Convert to weight dtype for the linear ops (weights are bf16)
-    w1_input = w1_input.to(w1_weight_.dtype());
-
+    auto action_in = noisy_action.to(w1_weight_.dtype());
+    auto mask = dof_mask.to(w1_weight_.dtype());
     // 1. Sinusoidal time embedding: [batch] -> [batch, action_hidden_size]
     auto time_emb = time_embed_.forward(timestep.to(torch::kFloat32));
+
+    if (mask.dim() == 3 && mask.size(1) == 1) {
+        mask = mask.expand({-1, action_in.size(1), -1});
+    }
+    auto w1_input = torch::cat({action_in, mask}, -1);
 
     // 2. Project input through w1: [batch, horizon, action_dim*2] -> [batch, horizon, action_hidden_size]
     auto action_embed = torch::linear(w1_input, w1_weight_);
 
     if (!use_adarms_) {
-        // Expand time_embed: [batch, action_hidden_size] -> [batch, horizon, action_hidden_size]
-        time_emb = time_emb.unsqueeze(1).expand({-1, action_embed.size(1), -1})
-                           .to(action_embed.dtype());
+        // Avoid repeating the same time branch projection across the full horizon.
+        // Original math:
+        //   w2(cat(action_embed, time_emb)) =
+        //   linear(action_embed, w2_action_weight_) + linear(time_emb, w2_time_weight_)
+        auto action_proj = torch::linear(action_embed, w2_action_weight_);
+        auto time_proj = torch::linear(time_emb.to(action_embed.dtype()), w2_time_weight_);
+        action_proj.add_(time_proj.unsqueeze(1));
 
-        // Concatenate: [batch, horizon, 2*action_hidden_size]
-        auto concat = torch::cat({action_embed, time_emb}, -1);
-
-        // w2: [2*action_hidden_size -> action_hidden_size]
-        concat = torch::linear(concat, w2_weight_);
-
-        // w3(silu(concat)) - cast to float32 for silu then back
-        auto embed = torch::linear(torch::silu(concat.to(torch::kFloat32)).to(concat.dtype()), w3_weight_);
+        // w3(silu(action_proj)) - cast to float32 for silu then back
+        auto embed = torch::linear(
+            torch::silu(action_proj.to(torch::kFloat32)).to(action_proj.dtype()),
+            w3_weight_);
 
         // Pad to full hidden_size if action_hidden_size < hidden_size
         if (action_hidden_size_ < hidden_size_) {

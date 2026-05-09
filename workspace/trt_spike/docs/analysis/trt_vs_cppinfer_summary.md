@@ -1629,10 +1629,13 @@ Orin 上已经实际完成：
   - `llm_inference` 成功
   - `Qwen3-VL-2B + int8_sq` 单次 VQA wall-clock：
     - **`6245.258 ms`**
+  - `Qwen2.5-VL-3B + int8_sq` 也已经在 Orin 上完整跑通
+  - 单次 VQA wall-clock：
+    - **`8234.588 ms`**
 
 所以当前更准确的判断是：
 
-> **官方量化主路在 Orin 上是可用的，但 `fp8` 会撞到硬件不支持，`int8_sq` 能跑通却仍然明显慢于 wall-x 当前的 `cpp_infer` VQA baseline。**
+> **官方量化主路在 Orin 上是可用的，但 `fp8` 会撞到硬件不支持，`int8_sq` 虽然能跑通，却仍然明显慢于 wall-x 当前的 `cpp_infer` VQA baseline；而且更大的 VLM 模型只会进一步拉高时延。**
 
 这一轮量化线可以直接收口成三句：
 

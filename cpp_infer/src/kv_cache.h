@@ -46,4 +46,5 @@ private:
     int batch_size_ = 0;
     int num_kv_heads_ = 0;
     int head_dim_ = 0;
+    torch::Device device_{torch::kCPU};
 };

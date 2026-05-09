@@ -16,24 +16,62 @@ import torch.nn.functional as F
 from safetensors import safe_open
 
 
+def pad_rows_for_int_mm(x_2d: torch.Tensor):
+    """Pad [M, K] rows to satisfy torch._int_mm CUDA shape constraints."""
+    m = x_2d.shape[0]
+    min_m = 24
+    pad_m = 0
+    if m < min_m:
+        pad_m = min_m - m
+    elif m % 8 != 0:
+        pad_m = 8 - (m % 8)
+    if pad_m > 0:
+        x_2d = F.pad(x_2d, (0, 0, 0, pad_m))
+    return x_2d, pad_m
+
+
+def get_orig_shape(int8_weights, weight_key, weight_int8):
+    shape_key = weight_key.replace(".weight", ".weight_orig_shape")
+    if shape_key in int8_weights:
+        shape = int8_weights[shape_key].to(torch.int64).cpu().tolist()
+        return int(shape[0]), int(shape[1])
+    return int(weight_int8.shape[0]), int(weight_int8.shape[1])
+
+
 class INT8Linear:
     """Per-token dynamic activation + per-channel static weight INT8 linear."""
 
-    def __init__(self, weight_int8, weight_scale, bias=None):
+    def __init__(self, weight_int8, weight_scale, bias=None, orig_shape=None):
         self.weight_int8 = weight_int8        # [N, K] int8
         self.weight_int8_t = weight_int8.t().contiguous()  # [K, N] for _int_mm
         self.weight_scale = weight_scale      # [N] f32
         self.bias = bias
+        if orig_shape is None:
+            self.orig_out_features = int(weight_int8.shape[0])
+            self.orig_in_features = int(weight_int8.shape[1])
+        else:
+            self.orig_out_features = int(orig_shape[0])
+            self.orig_in_features = int(orig_shape[1])
 
     def forward(self, x):
         orig_shape = list(x.shape)
         K = x.shape[-1]
         flat = x.reshape(-1, K)  # [M, K]
+        valid_m = flat.shape[0]
+        padded_k = self.weight_int8_t.shape[0]
+
+        if K != padded_k:
+            if K > padded_k:
+                raise ValueError(f"Input K={K} exceeds padded K={padded_k}")
+            flat = F.pad(flat, (0, padded_k - K))
 
         # Per-token dynamic activation quantization
         act_f32 = flat.float()
         act_scale = (act_f32.abs().amax(dim=1, keepdim=True) / 127.0).clamp(min=1e-10)
         act_int8 = (act_f32 / act_scale).round().clamp(-128, 127).to(torch.int8)
+        act_int8, pad_m = pad_rows_for_int_mm(act_int8)
+        if pad_m > 0:
+            act_scale = F.pad(act_scale, (0, 0, 0, pad_m))
 
         # INT8 GEMM: [M, K] @ [K, N] -> [M, N] int32
         out_i32 = torch._int_mm(act_int8, self.weight_int8_t)
@@ -41,10 +79,16 @@ class INT8Linear:
         # Dequantize
         out = out_i32.float() * act_scale * self.weight_scale.unsqueeze(0)
 
+        if self.orig_out_features != self.weight_int8.shape[0]:
+            out = out[:, :self.orig_out_features]
+
         if self.bias is not None:
             out = out + self.bias.float()
 
-        orig_shape[-1] = self.weight_int8.shape[0]
+        if pad_m > 0:
+            out = out[:valid_m]
+
+        orig_shape[-1] = self.orig_out_features
         return out.to(x.dtype).reshape(orig_shape)
 
 
@@ -79,9 +123,11 @@ def validate(model_dir: str, int8_dir: str, device: str = "cuda"):
     print(f"\nFound {len(quantized_keys)} quantized layers to validate")
 
     # Test configurations matching wall-x inference:
-    #   Prefill:  M=488 (420 prefix + 68 vision)
+    #   Decode:   M=1   (single-token VQA decode, padded internally for _int_mm)
     #   Postfix:  M=32  (action tokens, ODE loop)
+    #   Prefill:  M=488 (420 prefix + 68 vision)
     test_configs = [
+        ("Decode-1", 1),       # VQA decode
         ("Postfix-32", 32),     # ODE loop
         ("Prefill-488", 488),   # Full prefill
     ]
@@ -96,6 +142,7 @@ def validate(model_dir: str, int8_dir: str, device: str = "cuda"):
         W_int8 = int8_weights[key]
         scale_key = key.replace(".weight", ".weight_scale")
         W_scale = int8_weights[scale_key]
+        orig_shape = get_orig_shape(int8_weights, key, W_int8)
 
         bias_key = key.replace(".weight", ".bias")
         bias = bf16_weights.get(bias_key)
@@ -103,17 +150,13 @@ def validate(model_dir: str, int8_dir: str, device: str = "cuda"):
         N, K = W_bf16.shape
 
         for config_name, M in test_configs:
-            # Skip if M is too small for _int_mm (needs M > 16)
-            if M <= 16:
-                continue
-
             x = torch.randn(M, K, dtype=torch.bfloat16, device=device)
 
             # bf16 reference
             ref = F.linear(x, W_bf16, bias)
 
             # INT8 quantized
-            int8_op = INT8Linear(W_int8, W_scale, bias)
+            int8_op = INT8Linear(W_int8, W_scale, bias, orig_shape=orig_shape)
             out = int8_op.forward(x)
 
             # Error metrics
@@ -183,10 +226,11 @@ def validate(model_dir: str, int8_dir: str, device: str = "cuda"):
                 W_int8 = int8_weights[key]
                 scale_key = key.replace(".weight", ".weight_scale")
                 W_scale = int8_weights[scale_key]
+                orig_shape = get_orig_shape(int8_weights, key, W_int8)
                 bias = bf16_weights.get(key.replace(".weight", ".bias"))
 
                 x_bf16 = F.linear(x_bf16, W_bf16, bias)
-                int8_op = INT8Linear(W_int8, W_scale, bias)
+                int8_op = INT8Linear(W_int8, W_scale, bias, orig_shape=orig_shape)
                 x_int8 = int8_op.forward(x_int8)
 
         cos_sim = torch.nn.functional.cosine_similarity(

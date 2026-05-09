@@ -1,5 +1,6 @@
 #pragma once
 #include <torch/torch.h>
+#include "int8_linear.h"
 #include "triton_loader.h"
 #include "utils.h"
 
@@ -22,6 +23,7 @@ extern void AsymmetricDualExpertGemm(
 struct TokenTypeInfo {
     torch::Tensor token_types;  // [batch * seq_len] int tensor: 0=text/vision, 1=action
     int num_tokens_per_expert[2] = {0, 0};
+    bool grouped_by_expert = false;
 };
 
 // MoE block: 2 experts with asymmetric intermediate sizes
@@ -41,14 +43,15 @@ public:
 
 private:
     // Expert 0 (standard): gate_proj, up_proj, down_proj
-    torch::Tensor gate_proj_0_, up_proj_0_, down_proj_0_;
+    LinearOp gate_proj_0_, up_proj_0_, down_proj_0_;
     // Expert 1 (action): gate_proj, up_proj, down_proj
-    torch::Tensor gate_proj_1_, up_proj_1_, down_proj_1_;
+    LinearOp gate_proj_1_, up_proj_1_, down_proj_1_;
 
     int hidden_size_ = 0;
     int intermediate_0_ = 0;  // 11008
     int intermediate_1_ = 0;  // 2048
     int layer_idx_ = 0;
+    bool use_dual_gemm_ = true;
 };
 
 // Simple MLP (non-MoE) for layers that don't use MoE
@@ -59,7 +62,7 @@ public:
     torch::Tensor forward(const torch::Tensor& x, TritonKernelRegistry& triton);
 
 private:
-    torch::Tensor gate_proj_, up_proj_, down_proj_;
+    LinearOp gate_proj_, up_proj_, down_proj_;
     int hidden_size_ = 0;
     int intermediate_size_ = 0;
 };

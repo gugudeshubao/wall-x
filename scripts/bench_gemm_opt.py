@@ -12,6 +12,20 @@ import torch
 import numpy as np
 
 
+def pad_rows_for_int_mm(x_2d: torch.Tensor):
+    """Pad [M, K] rows to satisfy torch._int_mm CUDA shape constraints."""
+    m = x_2d.shape[0]
+    min_m = 24
+    pad_m = 0
+    if m < min_m:
+        pad_m = min_m - m
+    elif m % 8 != 0:
+        pad_m = 8 - (m % 8)
+    if pad_m > 0:
+        x_2d = torch.nn.functional.pad(x_2d, (0, 0, 0, pad_m))
+    return x_2d, pad_m
+
+
 def load_model(model_path, device="cuda"):
     """Load wall-x VQA model with FA2 attention."""
     from transformers import AutoProcessor
@@ -87,13 +101,15 @@ def quantize_int8_weight_only(model):
     """Apply INT8 weight-only quantization to nn.Linear layers.
 
     Manual per-channel INT8: store weights as int8 + fp32 scales.
-    At inference: dequantize to bf16 before matmul.
-    This tests if cuBLAS picks INT8 GEMM automatically.
+    The original bf16 weight is kept dequantized in module.weight so this mode
+    is only for memory/patching experiments. Real INT8 matmul happens in
+    try_native_int8_mm() for layers that satisfy torch._int_mm constraints.
     """
     print("\n[INT8] Quantizing nn.Linear weights to INT8...")
     t0 = time.time()
     count = 0
     total_params = 0
+    eligible = 0
 
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
@@ -103,14 +119,18 @@ def quantize_int8_weight_only(model):
             weight_int8 = (weight / scale).round().clamp(-128, 127).to(torch.int8)
             # Store quantized weight and scale
             module.weight_int8 = weight_int8
-            module.weight_scale = scale.to(torch.bfloat16)
+            module.weight_scale = scale.to(torch.float32)
+            module.int8mm_eligible = (weight.shape[0] % 8 == 0 and weight.shape[1] % 8 == 0)
             module.weight.data = (weight_int8.to(torch.bfloat16) * scale.to(torch.bfloat16))
             count += 1
             total_params += weight.numel()
+            if module.int8mm_eligible:
+                eligible += 1
 
     elapsed = time.time() - t0
     print(f"[INT8] Quantized {count} Linear layers ({total_params/1e6:.1f}M params) in {elapsed:.1f}s")
-    print(f"[INT8] Note: This is dequantize-on-store, testing weight compression effect.")
+    print(f"[INT8] INT8-MM eligible layers: {eligible}/{count}")
+    print(f"[INT8] Note: this path keeps bf16 compute unless forward is replaced.")
     return model
 
 
@@ -126,9 +146,9 @@ def try_native_int8_mm(model):
         print("[INT8-MM] torch._int_mm not available in this PyTorch version")
         return model, False
 
-    # Test if _int_mm works on this device
+    # Test if _int_mm works on this device with a shape that satisfies CUDA constraints
     try:
-        a = torch.randint(-128, 127, (16, 32), dtype=torch.int8, device="cuda")
+        a = torch.randint(-128, 127, (24, 32), dtype=torch.int8, device="cuda")
         b = torch.randint(-128, 127, (32, 64), dtype=torch.int8, device="cuda")
         c = torch._int_mm(a, b)
         print(f"[INT8-MM] torch._int_mm works! Output dtype: {c.dtype}")
@@ -137,41 +157,53 @@ def try_native_int8_mm(model):
         return model, False
 
     count = 0
+    skipped = 0
     for name, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear) and hasattr(module, 'weight_int8'):
-            original_forward = module.forward
+        if not isinstance(module, torch.nn.Linear) or not hasattr(module, 'weight_int8'):
+            continue
 
-            def make_int8_forward(mod):
-                w_int8 = mod.weight_int8  # [out, in]
-                w_scale = mod.weight_scale  # [out, 1]
-                bias = mod.bias
+        if not getattr(module, "int8mm_eligible", False):
+            skipped += 1
+            continue
 
-                def int8_forward(x):
-                    # x: [..., in_features] bf16
-                    orig_shape = x.shape
-                    x_2d = x.reshape(-1, x.shape[-1])  # [batch, in]
+        def make_int8_forward(mod):
+            w_int8 = mod.weight_int8  # [out, in]
+            w_scale = mod.weight_scale  # [out, 1]
+            bias = mod.bias
 
-                    # Quantize input per-token
-                    x_scale = x_2d.abs().amax(dim=1, keepdim=True).clamp(min=1e-5) / 127.0
-                    x_int8 = (x_2d / x_scale).round().clamp(-128, 127).to(torch.int8)
+            def int8_forward(x):
+                # x: [..., in_features] bf16
+                orig_shape = x.shape
+                x_2d = x.reshape(-1, x.shape[-1])  # [batch, in]
+                valid_m = x_2d.shape[0]
 
-                    # INT8 GEMM: [batch, in] @ [in, out] -> [batch, out] (int32)
-                    out_int32 = torch._int_mm(x_int8, w_int8.t())
+                # Quantize input per-token
+                x_scale = x_2d.abs().amax(dim=1, keepdim=True).clamp(min=1e-5) / 127.0
+                x_int8 = (x_2d / x_scale).round().clamp(-128, 127).to(torch.int8)
+                x_int8, pad_m = pad_rows_for_int_mm(x_int8)
+                if pad_m > 0:
+                    x_scale = torch.nn.functional.pad(x_scale, (0, 0, 0, pad_m))
 
-                    # Dequantize: multiply by scales
-                    out_bf16 = out_int32.to(torch.bfloat16) * (x_scale * w_scale.t())
+                # INT8 GEMM: [batch, in] @ [in, out] -> [batch, out] (int32)
+                out_int32 = torch._int_mm(x_int8, w_int8.t())
 
-                    if bias is not None:
-                        out_bf16 = out_bf16 + bias
+                # Dequantize: multiply by scales
+                out_bf16 = out_int32.to(torch.float32) * (x_scale * w_scale.t())
 
-                    return out_bf16.reshape(*orig_shape[:-1], -1)
+                if bias is not None:
+                    out_bf16 = out_bf16 + bias.float()
 
-                return int8_forward
+                if pad_m > 0:
+                    out_bf16 = out_bf16[:valid_m]
 
-            module.forward = make_int8_forward(module)
-            count += 1
+                return out_bf16.to(x.dtype).reshape(*orig_shape[:-1], -1)
 
-    print(f"[INT8-MM] Replaced {count} Linear.forward with INT8 matmul")
+            return int8_forward
+
+        module.forward = make_int8_forward(module)
+        count += 1
+
+    print(f"[INT8-MM] Replaced {count} Linear.forward with INT8 matmul, skipped {skipped} unaligned layers")
     return model, count > 0
 
 
@@ -264,7 +296,7 @@ def main():
     print(f"torch.compile available: {hasattr(torch, 'compile')}")
     print(f"torch._int_mm available: {hasattr(torch, '_int_mm')}")
 
-    modes = [args.mode] if args.mode != "all" else ["baseline", "compile"]
+    modes = [args.mode] if args.mode != "all" else ["baseline", "compile", "int8", "int8mm"]
     all_stats = []
 
     for mode in modes:

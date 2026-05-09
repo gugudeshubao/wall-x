@@ -135,6 +135,8 @@ private:
     // Weights
     torch::Tensor w1_weight_;           // [action_dim -> action_hidden_size]
     torch::Tensor w2_weight_;           // [action_hidden_size*2 -> action_hidden_size]
+    torch::Tensor w2_action_weight_;    // first half of w2 input: action branch
+    torch::Tensor w2_time_weight_;      // second half of w2 input: time embedding branch
     torch::Tensor w3_weight_;           // [action_hidden_size -> action_hidden_size]
     torch::Tensor proj_back_weight_;    // [action_hidden_size -> action_dim]
 

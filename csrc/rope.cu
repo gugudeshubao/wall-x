@@ -49,8 +49,8 @@ template <typename T>
 __global__ void multimodal_rope_forward_kernel(
     const T *__restrict__ q,                       // [batch, q_heads, seq_len, head_dim]
     const T *__restrict__ k,                       // [batch, kv_heads, seq_len, head_dim]
-    const T *__restrict__ cos,                     // [3, batch, seq_len, head_dim]
-    const T *__restrict__ sin,                     // [3, batch, seq_len, head_dim]
+    const T *__restrict__ cos,                     // [batch, seq_len, head_dim]
+    const T *__restrict__ sin,                     // [batch, seq_len, head_dim]
     T *__restrict__ q_out,                         // [batch, q_heads, seq_len, head_dim]
     T *__restrict__ k_out,                         // [batch, kv_heads, seq_len, head_dim]
     const int *__restrict__ mrope_section_doubled, // [32, 48, 48]
@@ -101,25 +101,13 @@ __global__ void multimodal_rope_forward_kernel(
                     break;
 
                 // Determine which section this dimension belongs to
-                int section_idx;
-                int cos_sin_d = dim_idx;
-                if (dim_idx < mrope_section_doubled[0])
-                {
-                    section_idx = 0;
-                }
-                else if (dim_idx < mrope_section_doubled[0] + mrope_section_doubled[1])
-                {
-                    section_idx = 1;
-                }
-                else
-                {
-                    section_idx = 2;
-                }
+                // (kept for documentation: section 0 = temporal, 1 = height, 2 = width)
+                // The cos/sin tensor already has correct per-section values interleaved
+                // in [batch, seq, head_dim] layout from compute_rotary_emb
 
-                // Load cos/sin values (coalesced access)
-                int cos_sin_idx = section_idx * batch_size * seq_len * head_dim +
-                                  batch_idx * seq_len * head_dim +
-                                  seq_idx * head_dim + cos_sin_d;
+                // Load cos/sin values - flat [batch, seq, head_dim] layout
+                int cos_sin_idx = batch_idx * seq_len * head_dim +
+                                  seq_idx * head_dim + dim_idx;
 
                 T cos_val = cos[cos_sin_idx];
                 T sin_val = sin[cos_sin_idx];
@@ -230,26 +218,12 @@ __global__ void multimodal_rope_backward_kernel(
                 if (dim_idx >= head_dim)
                     break;
 
-                // Get section info for cos/sin reconstruction
-                int section_idx;
-                int cos_sin_d = dim_idx;
-                if (dim_idx < mrope_section_doubled[0])
-                {
-                    section_idx = 0;
-                }
-                else if (dim_idx < mrope_section_doubled[0] + mrope_section_doubled[1])
-                {
-                    section_idx = 1;
-                }
-                else
-                {
-                    section_idx = 2;
-                }
+                // cos/sin are in flat [batch, seq, head_dim] layout
+                // with correct per-section values already interleaved
 
                 // Global cos/sin index
-                int cos_sin_idx = section_idx * batch_size * seq_len * head_dim +
-                                  batch_idx * seq_len * head_dim +
-                                  seq_idx * head_dim + cos_sin_d;
+                int cos_sin_idx = batch_idx * seq_len * head_dim +
+                                  seq_idx * head_dim + dim_idx;
 
                 // Tensor index for current position
                 int tensor_idx = batch_idx * total_heads * seq_len * head_dim +
@@ -271,25 +245,9 @@ __global__ void multimodal_rope_backward_kernel(
                 // Get gradient from the paired dimension
                 T paired_grad_out = is_q_head ? grad_q_out[rotate_tensor_idx] : grad_k_out[rotate_tensor_idx];
 
-                // Get paired sin value
-                int paired_section_idx;
-                int paired_cos_sin_d = rotate_dim;
-                if (rotate_dim < mrope_section_doubled[0])
-                {
-                    paired_section_idx = 0;
-                }
-                else if (rotate_dim < mrope_section_doubled[0] + mrope_section_doubled[1])
-                {
-                    paired_section_idx = 1;
-                }
-                else
-                {
-                    paired_section_idx = 2;
-                }
-
-                int paired_cos_sin_idx = paired_section_idx * batch_size * seq_len * head_dim +
-                                         batch_idx * seq_len * head_dim +
-                                         seq_idx * head_dim + paired_cos_sin_d;
+                // Get paired sin value (flat layout)
+                int paired_cos_sin_idx = batch_idx * seq_len * head_dim +
+                                         seq_idx * head_dim + rotate_dim;
                 T paired_sin_val = sin[paired_cos_sin_idx];
 
                 // === Compute input gradients (the only thing we need!) ===

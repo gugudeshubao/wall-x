@@ -1,7 +1,12 @@
 #include "model.h"
+#include <cuda_runtime.h>
 #include <torch/torch.h>
 #include <iostream>
 #include <algorithm>
+#include <cstdlib>
+
+#include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAGuard.h>
 
 // ===================== RMSNorm helper =====================
 
@@ -10,6 +15,280 @@ torch::Tensor WallXModel::rms_norm(const torch::Tensor& x, const torch::Tensor& 
     auto variance = x_f32.pow(2).mean(-1, true);
     auto normed = x_f32 * torch::rsqrt(variance + config_.rms_norm_eps);
     return (weight * normed).to(x.dtype());
+}
+
+bool WallXModel::maybe_replay_flow_action_graph(
+    const torch::Tensor& noisy_action,
+    const torch::Tensor& postfix_embeds,
+    const torch::Tensor& postfix_position_ids,
+    const torch::Tensor& postfix_input_ids,
+    const torch::Tensor& postfix_moe_types,
+    const torch::Tensor& postfix_cos,
+    const torch::Tensor& postfix_sin,
+    const torch::Tensor& dof_mask,
+    const torch::Tensor& remaining_times,
+    const TokenTypeInfo& postfix_token_types,
+    int batch_size,
+    int action_horizon,
+    int action_dim,
+    const std::string& dataset_name,
+    torch::Tensor& final_action,
+    double& ode_ms) {
+
+    if (std::getenv("WALLX_DISABLE_FLOW_GRAPH") != nullptr) {
+        return false;
+    }
+
+    // Current fast path is specialized for the fixed-shape benchmark / deployment case.
+    if (!noisy_action.is_cuda() ||
+        batch_size != 1 ||
+        config_.hidden_size != 2048 ||
+        postfix_embeds.size(1) != action_horizon ||
+        remaining_times.dim() != 1 ||
+        remaining_times.size(0) <= 0) {
+        return false;
+    }
+
+    if (!(postfix_input_ids == config_.action_token_id).all().item<bool>()) {
+        return false;
+    }
+
+    const int seq_len = postfix_embeds.size(1);
+    const int prefix_length = kv_cache_.current_len();
+    const int num_steps = remaining_times.size(0);
+
+    auto needs_rebuild = [&]() {
+        if (!flow_action_graph_ || !flow_action_graph_->initialized) {
+            return true;
+        }
+        return flow_action_graph_->batch_size != batch_size ||
+               flow_action_graph_->seq_len != seq_len ||
+               flow_action_graph_->action_horizon != action_horizon ||
+               flow_action_graph_->action_dim != action_dim ||
+               flow_action_graph_->num_steps != num_steps ||
+               flow_action_graph_->prefix_length != prefix_length;
+    };
+
+    if (needs_rebuild()) {
+        flow_action_graph_ = std::make_unique<FlowActionGraphCache>();
+        auto& cache = *flow_action_graph_;
+        cache.batch_size = batch_size;
+        cache.seq_len = seq_len;
+        cache.action_horizon = action_horizon;
+        cache.action_dim = action_dim;
+        cache.num_steps = num_steps;
+        cache.prefix_length = prefix_length;
+        cache.state = noisy_action.clone();
+        cache.dof_mask = dof_mask.clone();
+        cache.postfix_embeds = postfix_embeds.clone();
+        cache.postfix_cos = postfix_cos.clone();
+        cache.postfix_sin = postfix_sin.clone();
+        cache.ode_embeds_buf = postfix_embeds.clone();
+        cache.postfix_token_types.token_types = postfix_token_types.token_types.clone();
+        for (int i = 0; i < config_.num_experts; i++) {
+            cache.postfix_token_types.num_tokens_per_expert[i] =
+                postfix_token_types.num_tokens_per_expert[i];
+        }
+        cache.postfix_token_types.grouped_by_expert = postfix_token_types.grouped_by_expert;
+
+        auto times_cpu = remaining_times.to(torch::kCPU, torch::kFloat32).contiguous();
+        auto* t_ptr = times_cpu.data_ptr<float>();
+        cache.timestep_tensors.reserve(num_steps);
+        cache.dts.reserve(num_steps);
+        for (int i = 0; i < num_steps; i++) {
+            cache.timestep_tensors.push_back(
+                torch::full({batch_size}, t_ptr[i],
+                            torch::TensorOptions().dtype(torch::kFloat32).device(noisy_action.device())));
+            float dt = (i < num_steps - 1) ? (t_ptr[i + 1] - t_ptr[i]) : (1.0f - t_ptr[i]);
+            cache.dts.push_back(dt);
+        }
+
+        // Ensure tensors prepared on the caller's stream are visible before
+        // the side-stream warmup/capture touches them.
+        cudaDeviceSynchronize();
+
+        // Warm up allocations on a side stream before capture.
+        auto capture_stream = at::cuda::getStreamFromPool(false, noisy_action.device().index());
+        cache.capture_stream = std::make_unique<c10::cuda::CUDAStream>(capture_stream);
+        {
+            c10::cuda::CUDAStreamGuard stream_guard(capture_stream);
+            auto state = cache.state.clone();
+            for (int i = 0; i < num_steps; i++) {
+                auto embed = action_proc_.step(cache.timestep_tensors[i], state, cache.dof_mask);
+                embed = embed.to(cache.postfix_embeds.dtype());
+                cache.ode_embeds_buf.copy_(embed);
+                auto hs = transformer_forward_postfix(
+                    cache.ode_embeds_buf, cache.postfix_cos, cache.postfix_sin,
+                    cache.postfix_token_types);
+                auto act_hs = hs.reshape({-1, config_.hidden_size}).to(torch::kFloat32);
+                auto v_pred = action_proc_.action_proj_back(
+                    act_hs.index({torch::indexing::Slice(),
+                                  torch::indexing::Slice(0, action_proc_.action_hidden_size())}));
+                state.add_(v_pred.reshape({batch_size, action_horizon, action_dim}), cache.dts[i]);
+            }
+            cudaStreamSynchronize(capture_stream.stream());
+        }
+
+        {
+            c10::cuda::CUDAStreamGuard stream_guard(capture_stream);
+            cache.graph.capture_begin(at::cuda::graph_pool_handle(), cudaStreamCaptureModeGlobal);
+            for (int i = 0; i < num_steps; i++) {
+                auto embed = action_proc_.step(cache.timestep_tensors[i], cache.state, cache.dof_mask);
+                embed = embed.to(cache.postfix_embeds.dtype());
+                cache.ode_embeds_buf.copy_(embed);
+                auto hs = transformer_forward_postfix(
+                    cache.ode_embeds_buf, cache.postfix_cos, cache.postfix_sin,
+                    cache.postfix_token_types);
+                auto act_hs = hs.reshape({-1, config_.hidden_size}).to(torch::kFloat32);
+                auto v_pred = action_proc_.action_proj_back(
+                    act_hs.index({torch::indexing::Slice(),
+                                  torch::indexing::Slice(0, action_proc_.action_hidden_size())}));
+                cache.state.add_(v_pred.reshape({batch_size, action_horizon, action_dim}), cache.dts[i]);
+            }
+            cache.graph.capture_end();
+        }
+
+        cache.initialized = true;
+    }
+
+    auto& cache = *flow_action_graph_;
+    {
+        c10::cuda::CUDAStreamGuard stream_guard(*cache.capture_stream);
+        cache.state.copy_(noisy_action);
+
+        CudaTimer graph_timer;
+        graph_timer.start(cache.capture_stream->stream());
+        cache.graph.replay();
+        ode_ms = graph_timer.elapsed_ms(cache.capture_stream->stream());
+    }
+    final_action = cache.state;
+    return true;
+}
+
+bool WallXModel::maybe_replay_vqa_decode_graph(
+    const torch::Tensor& next_token_from_prefill,
+    int64_t current_pos_start,
+    int max_new_tokens,
+    torch::Tensor& generated_gpu,
+    double& decode_ms) {
+
+    // Disabled for now: decode graph capture is less stable than Flow Action's
+    // fixed-shape ODE loop because it mixes graph replay with per-step KV growth.
+    // Keep the implementation scaffold for future work, but fall back to the
+    // stable GPU-only decode loop today.
+    return false;
+
+    if (!next_token_from_prefill.is_cuda() ||
+        next_token_from_prefill.dtype() != torch::kLong ||
+        next_token_from_prefill.numel() != 1 ||
+        max_new_tokens <= 1 ||
+        kv_cache_.current_len() <= 0) {
+        return false;
+    }
+
+    const int batch_size = 1;
+    const int seq_len = kv_cache_.current_len();
+
+    auto needs_rebuild = [&]() {
+        if (!vqa_decode_graph_ || !vqa_decode_graph_->initialized) {
+            return true;
+        }
+        return vqa_decode_graph_->batch_size != batch_size ||
+               vqa_decode_graph_->seq_len != seq_len ||
+               vqa_decode_graph_->max_new_tokens != max_new_tokens ||
+               vqa_decode_graph_->current_pos_start != current_pos_start;
+    };
+
+    if (needs_rebuild()) {
+        vqa_decode_graph_ = std::make_unique<VQADecodeGraphCache>();
+        auto& cache = *vqa_decode_graph_;
+        cache.batch_size = batch_size;
+        cache.seq_len = seq_len;
+        cache.max_new_tokens = max_new_tokens;
+        cache.current_pos_start = static_cast<int>(current_pos_start);
+        cache.token_id = torch::zeros({1, 1},
+            torch::TensorOptions().dtype(torch::kLong).device(next_token_from_prefill.device()));
+        cache.decode_pos = torch::zeros({3, 1, 1},
+            torch::TensorOptions().dtype(torch::kLong).device(next_token_from_prefill.device()));
+        cache.next_token = torch::zeros({1, 1},
+            torch::TensorOptions().dtype(torch::kLong).device(next_token_from_prefill.device()));
+        auto single_type = torch::zeros({1},
+            torch::TensorOptions().dtype(torch::kLong).device(next_token_from_prefill.device()));
+        cache.decode_token_types.token_types = single_type;
+        cache.decode_token_types.num_tokens_per_expert[0] = 1;
+        for (int i = 1; i < config_.num_experts; i++) {
+            cache.decode_token_types.num_tokens_per_expert[i] = 0;
+        }
+        cache.decode_token_types.grouped_by_expert = true;
+
+        auto capture_stream = at::cuda::getStreamFromPool(false, next_token_from_prefill.device().index());
+        cache.capture_stream = std::make_unique<c10::cuda::CUDAStream>(capture_stream);
+        cache.graphs.reserve(max_new_tokens - 1);
+
+        {
+            c10::cuda::CUDAStreamGuard stream_guard(capture_stream);
+            kv_cache_.truncate(seq_len);
+            for (int step = 0; step < max_new_tokens - 1; step++) {
+                cache.token_id.zero_();
+                cache.decode_pos.fill_(current_pos_start + step);
+                auto token_embed = torch::embedding(embed_tokens_, cache.token_id);
+                auto decode_hidden = transformer_forward(
+                    token_embed,
+                    cache.decode_pos,
+                    cache.decode_token_types,
+                    /*use_cache=*/true,
+                    /*is_causal=*/false);
+                auto step_logits = torch::matmul(decode_hidden.index({0, 0}), lm_head_weight_.t());
+                cache.next_token.copy_(step_logits.argmax().reshape({1, 1}));
+            }
+            cudaStreamSynchronize(capture_stream.stream());
+            kv_cache_.truncate(seq_len);
+        }
+
+        for (int step = 0; step < max_new_tokens - 1; step++) {
+            auto graph = std::make_unique<at::cuda::CUDAGraph>();
+            {
+                c10::cuda::CUDAStreamGuard stream_guard(capture_stream);
+                cache.token_id.zero_();
+                cache.decode_pos.fill_(current_pos_start + step);
+                graph->capture_begin(at::cuda::graph_pool_handle(), cudaStreamCaptureModeGlobal);
+                auto token_embed = torch::embedding(embed_tokens_, cache.token_id);
+                auto decode_hidden = transformer_forward(
+                    token_embed,
+                    cache.decode_pos,
+                    cache.decode_token_types,
+                    /*use_cache=*/true,
+                    /*is_causal=*/false);
+                auto step_logits = torch::matmul(decode_hidden.index({0, 0}), lm_head_weight_.t());
+                cache.next_token.copy_(step_logits.argmax().reshape({1, 1}));
+                graph->capture_end();
+            }
+            cache.graphs.push_back(std::move(graph));
+        }
+
+        kv_cache_.truncate(seq_len);
+        cache.initialized = true;
+    }
+
+    auto& cache = *vqa_decode_graph_;
+    {
+        c10::cuda::CUDAStreamGuard stream_guard(*cache.capture_stream);
+        kv_cache_.truncate(seq_len);
+        cache.token_id.copy_(next_token_from_prefill);
+        generated_gpu.index_put_({0}, next_token_from_prefill.reshape({1}));
+
+        CudaTimer timer;
+        timer.start(cache.capture_stream->stream());
+        for (int step = 0; step < max_new_tokens - 1; step++) {
+            cache.decode_pos.fill_(current_pos_start + step);
+            cache.graphs[step]->replay();
+            generated_gpu.index_put_({step + 1}, cache.next_token.reshape({1}));
+            cache.token_id.copy_(cache.next_token);
+        }
+        cudaStreamSynchronize(cache.capture_stream->stream());
+        decode_ms = timer.elapsed_ms(cache.capture_stream->stream());
+    }
+    return true;
 }
 
 // ===================== Rotary Embedding =====================
@@ -50,6 +329,10 @@ std::pair<torch::Tensor, torch::Tensor> WallXModel::compute_rotary_emb(
     // Double for the full head_dim (cos/sin for both halves of rotate_half)
     cos = torch::cat({cos, cos}, -1);  // [batch, seq, head_dim]
     sin = torch::cat({sin, sin}, -1);
+
+    // Convert to bfloat16 to match Q/K dtype (CUDA kernel dispatches on Q's dtype)
+    cos = cos.to(torch::kBFloat16);
+    sin = sin.to(torch::kBFloat16);
 
     return {cos, sin};
 }
@@ -132,6 +415,31 @@ void WallXModel::load_triton_kernels(const std::string& kernels_dir) {
     triton_.load_directory(kernels_dir);
 }
 
+torch::Tensor WallXModel::encode_image(
+    const torch::Tensor& pixel_values,
+    const torch::Tensor& image_grid_thw) {
+    if (!pixel_values.defined()) {
+        return torch::Tensor();
+    }
+    return vision_.forward(pixel_values, image_grid_thw);
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> WallXModel::encode_image_debug(
+    const torch::Tensor& pixel_values,
+    const torch::Tensor& image_grid_thw) {
+    if (!pixel_values.defined()) {
+        return {torch::Tensor(), torch::Tensor(), torch::Tensor(), torch::Tensor(), torch::Tensor()};
+    }
+    return vision_.forward_debug(pixel_values, image_grid_thw);
+}
+
+VisionBlockDebug WallXModel::encode_image_block_debug(
+    const torch::Tensor& hidden_states_reordered,
+    const torch::Tensor& image_grid_thw,
+    int block_idx) {
+    return vision_.run_block_debug(hidden_states_reordered, image_grid_thw, block_idx);
+}
+
 // ===================== Transformer Forward =====================
 
 torch::Tensor WallXModel::transformer_forward(
@@ -149,7 +457,6 @@ torch::Tensor WallXModel::transformer_forward(
         hidden_states = layers_[i].forward(
             hidden_states, cos, sin,
             kv_cache_, token_types, triton_, is_causal);
-        // After first layer, hidden_states IS the residual for next layer
     }
 
     // Final layer norm
@@ -259,6 +566,7 @@ WallXModel::GenerateResult WallXModel::generate_flow_action(
     for (int i = 0; i < config_.num_experts; i++) {
         token_types.num_tokens_per_expert[i] = (moe_token_types == i).sum().item<int>();
     }
+    token_types.grouped_by_expert = true;
 
     // --- 5. Initialize noisy action ---
     auto noise = torch::randn({batch_size, action_horizon, action_dim},
@@ -320,6 +628,7 @@ WallXModel::GenerateResult WallXModel::generate_flow_action(
     for (int i = 0; i < config_.num_experts; i++) {
         postfix_token_types.num_tokens_per_expert[i] = (postfix_moe_types == i).sum().item<int>();
     }
+    postfix_token_types.grouped_by_expert = true;
 
     // --- 9. ODE integration (remaining timesteps) ---
     step_timer.start();
@@ -327,36 +636,59 @@ WallXModel::GenerateResult WallXModel::generate_flow_action(
     auto remaining_times = times.index({torch::indexing::Slice(1, torch::indexing::None)});
 
     // Pre-compute values that don't change across ODE steps
-    auto postfix_action_mask = (postfix_input_ids == config_.action_token_id);
     auto [postfix_cos, postfix_sin] = compute_rotary_emb(postfix_position_ids, postfix_embeds.size(1));
-    auto ode_embeds_buf = postfix_embeds.clone();  // pre-allocated buffer for embedding scatter
 
-    auto velocity_fn = [&](float t, const torch::Tensor& state) -> torch::Tensor {
-        // Create timestep tensor
-        auto timestep = torch::full({batch_size}, t, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+    torch::Tensor final_action;
+    double graph_ode_ms = 0.0;
+    if (maybe_replay_flow_action_graph(
+            noisy_action,
+            postfix_embeds,
+            postfix_position_ids,
+            postfix_input_ids,
+            postfix_moe_types,
+            postfix_cos,
+            postfix_sin,
+            dof_mask,
+            remaining_times,
+            postfix_token_types,
+            batch_size,
+            action_horizon,
+            action_dim,
+            dataset_name,
+            final_action,
+            graph_ode_ms)) {
+        result.ode_ms = static_cast<float>(graph_ode_ms);
+    } else {
+        auto postfix_action_mask = (postfix_input_ids == config_.action_token_id);
+        auto ode_embeds_buf = postfix_embeds.clone();  // pre-allocated buffer for embedding scatter
 
-        // Embed noisy action at current timestep
-        auto embed = action_proc_.step(timestep, state, dof_mask);
-        embed = embed.reshape({-1, config_.hidden_size}).to(postfix_embeds.dtype());
+        auto velocity_fn = [&](float t, const torch::Tensor& state) -> torch::Tensor {
+            // Create timestep tensor
+            auto timestep = torch::full({batch_size}, t, torch::TensorOptions().dtype(torch::kFloat32).device(device));
 
-        // Replace action embeddings in postfix (reuse pre-allocated buffer)
-        ode_embeds_buf.copy_(postfix_embeds);
-        ode_embeds_buf.index_put_({postfix_action_mask}, embed);
+            // Embed noisy action at current timestep
+            auto embed = action_proc_.step(timestep, state, dof_mask);
+            embed = embed.reshape({-1, config_.hidden_size}).to(postfix_embeds.dtype());
 
-        // Forward through transformer (using cached prefix KV + pre-computed rotary)
-        auto hs = transformer_forward_postfix(ode_embeds_buf, postfix_cos, postfix_sin,
-                                               postfix_token_types);
+            // Replace action embeddings in postfix (reuse pre-allocated buffer)
+            ode_embeds_buf.copy_(postfix_embeds);
+            ode_embeds_buf.index_put_({postfix_action_mask}, embed);
 
-        // Extract velocity from action hidden states
-        auto act_hs = hs.index({postfix_action_mask}).to(torch::kFloat32);
-        auto v_pred = action_proc_.action_proj_back(
-            act_hs.index({torch::indexing::Slice(), torch::indexing::Slice(0, action_proc_.action_hidden_size())}));
+            // Forward through transformer (using cached prefix KV + pre-computed rotary)
+            auto hs = transformer_forward_postfix(ode_embeds_buf, postfix_cos, postfix_sin,
+                                                   postfix_token_types);
 
-        return v_pred.reshape({batch_size, action_horizon, action_dim});
-    };
+            // Extract velocity from action hidden states
+            auto act_hs = hs.index({postfix_action_mask}).to(torch::kFloat32);
+            auto v_pred = action_proc_.action_proj_back(
+                act_hs.index({torch::indexing::Slice(), torch::indexing::Slice(0, action_proc_.action_hidden_size())}));
 
-    auto final_action = EulerODESolver::solve(velocity_fn, noisy_action, remaining_times);
-    result.ode_ms = step_timer.elapsed_ms();
+            return v_pred.reshape({batch_size, action_horizon, action_dim});
+        };
+
+        final_action = EulerODESolver::solve(velocity_fn, noisy_action, remaining_times);
+        result.ode_ms = step_timer.elapsed_ms();
+    }
 
     // --- 10. Unnormalize ---
     result.predict_action = action_proc_.unnormalize(final_action, dataset_name);
@@ -371,6 +703,7 @@ WallXModel::TextGenerateResult WallXModel::generate_text(
     const torch::Tensor& input_ids,
     const torch::Tensor& pixel_values,
     const torch::Tensor& image_grid_thw,
+    const torch::Tensor& image_embeds_override,
     int max_new_tokens,
     bool greedy) {
 
@@ -387,8 +720,10 @@ WallXModel::TextGenerateResult WallXModel::generate_text(
 
     // --- 2. Vision Encoding ---
     step_timer.start();
-    if (pixel_values.defined()) {
-        auto image_embeds = vision_.forward(pixel_values, image_grid_thw);
+    if (image_embeds_override.defined() || pixel_values.defined()) {
+        auto image_embeds = image_embeds_override.defined()
+            ? image_embeds_override
+            : vision_.forward(pixel_values, image_grid_thw);
         auto image_mask = (input_ids == config_.image_token_id);
         auto mask_expanded = image_mask.unsqueeze(-1).expand_as(inputs_embeds);
         inputs_embeds = inputs_embeds.masked_scatter(mask_expanded, image_embeds.to(inputs_embeds.dtype()));
@@ -396,16 +731,26 @@ WallXModel::TextGenerateResult WallXModel::generate_text(
     result.vit_ms = step_timer.elapsed_ms();
 
     // --- 3. Position IDs (3D RoPE) ---
-    auto [position_ids, rope_deltas] = get_rope_index(
-        input_ids, image_grid_thw,
-        /*video_grid_thw=*/torch::optional<torch::Tensor>(),
-        /*second_per_grid_ts=*/torch::optional<torch::Tensor>(),
-        /*attention_mask=*/torch::optional<torch::Tensor>(),
-        config_.vision_spatial_merge_size,
-        config_.image_token_id,
-        /*video_token_id=*/config_.image_token_id + 1,
-        config_.vision_start_token_id,
-        /*tokens_per_second=*/1.0f);
+    torch::Tensor position_ids;
+    if (image_grid_thw.defined()) {
+        auto pos_and_delta = get_rope_index(
+            input_ids, image_grid_thw,
+            /*video_grid_thw=*/torch::optional<torch::Tensor>(),
+            /*second_per_grid_ts=*/torch::optional<torch::Tensor>(),
+            /*attention_mask=*/torch::optional<torch::Tensor>(),
+            config_.vision_spatial_merge_size,
+            config_.image_token_id,
+            /*video_token_id=*/config_.image_token_id + 1,
+            config_.vision_start_token_id,
+            /*tokens_per_second=*/1.0f);
+        position_ids = std::get<0>(pos_and_delta);
+    } else {
+        // Text-only debug/inference path: all three mRoPE axes share the same 1D positions.
+        position_ids = torch::arange(
+            seq_len,
+            torch::TensorOptions().dtype(torch::kLong).device(device)
+        ).view({1, 1, seq_len}).expand({3, batch_size, seq_len});
+    }
 
     // --- 4. MoE token types: all type 0 (text/vision), no action tokens ---
     TokenTypeInfo token_types;
@@ -415,6 +760,7 @@ WallXModel::TextGenerateResult WallXModel::generate_text(
     for (int i = 1; i < config_.num_experts; i++) {
         token_types.num_tokens_per_expert[i] = 0;
     }
+    token_types.grouped_by_expert = true;
 
     // --- 5. Allocate KV cache ---
     kv_cache_.allocate(config_.num_hidden_layers, batch_size, seq_len + max_new_tokens,
@@ -428,15 +774,16 @@ WallXModel::TextGenerateResult WallXModel::generate_text(
     // Apply lm_head to get logits for the last position
     auto last_hidden = hidden_states.index({0, -1});  // [hidden_size]
     auto logits = torch::matmul(last_hidden, lm_head_weight_.t());  // [vocab_size]
-    auto next_token = logits.argmax().item<int64_t>();
+    auto next_token_tensor = logits.argmax().reshape({1, 1});
     result.prefill_ms = step_timer.elapsed_ms();
 
     // --- 7. Decode loop ---
     step_timer.start();
 
-    // Track generated tokens
-    std::vector<int64_t> generated;
-    generated.push_back(next_token);
+    // Track generated tokens on GPU to avoid per-step GPU->CPU sync.
+    auto generated_gpu = torch::empty({max_new_tokens},
+        torch::TensorOptions().dtype(torch::kLong).device(device));
+    generated_gpu.index_put_({0}, next_token_tensor.reshape({1}));
 
     // Compute next position: max position from prefill + 1
     // For text tokens in multimodal RoPE, all 3 dims have the same position
@@ -450,39 +797,187 @@ WallXModel::TextGenerateResult WallXModel::generate_text(
     for (int i = 1; i < config_.num_experts; i++) {
         decode_token_types.num_tokens_per_expert[i] = 0;
     }
+    decode_token_types.grouped_by_expert = true;
 
-    for (int step = 1; step < max_new_tokens; step++) {
-        // Check EOS
-        if (next_token == config_.eos_token_id) break;
+    double decode_graph_ms = 0.0;
+    if (maybe_replay_vqa_decode_graph(
+            next_token_tensor,
+            current_pos,
+            max_new_tokens,
+            generated_gpu,
+            decode_graph_ms)) {
+        result.decode_ms = static_cast<float>(decode_graph_ms);
+    } else {
+        auto token_id = torch::empty({1, 1}, torch::TensorOptions().dtype(torch::kLong).device(device));
+        auto decode_pos = torch::empty({3, 1, 1}, torch::TensorOptions().dtype(torch::kLong).device(device));
 
-        // Embed new token: [1, 1, hidden_size]
-        auto token_id = torch::tensor({{next_token}}, torch::TensorOptions().dtype(torch::kLong).device(device));
-        auto token_embed = torch::embedding(embed_tokens_, token_id);
+        for (int step = 1; step < max_new_tokens; step++) {
+            token_id.copy_(next_token_tensor);
+            auto token_embed = torch::embedding(embed_tokens_, token_id);
 
-        // Position IDs for decode: [3, 1, 1], all dims = current_pos
-        auto decode_pos = torch::full({3, 1, 1}, current_pos, torch::TensorOptions().dtype(torch::kLong).device(device));
+            // Position IDs for decode: [3, 1, 1], all dims = current_pos
+            decode_pos.fill_(current_pos);
 
-        // Forward through transformer (use_cache=true advances KV cache)
-        auto decode_hidden = transformer_forward(token_embed, decode_pos, decode_token_types,
-                                                   /*use_cache=*/true, /*is_causal=*/false);
+            // Forward through transformer (use_cache=true advances KV cache)
+            auto decode_hidden = transformer_forward(token_embed, decode_pos, decode_token_types,
+                                                       /*use_cache=*/true, /*is_causal=*/false);
 
-        // Apply lm_head
-        auto step_logits = torch::matmul(decode_hidden.index({0, 0}), lm_head_weight_.t());
-        next_token = step_logits.argmax().item<int64_t>();
+            // Apply lm_head
+            auto step_logits = torch::matmul(decode_hidden.index({0, 0}), lm_head_weight_.t());
+            next_token_tensor = step_logits.argmax().reshape({1, 1});
 
-        generated.push_back(next_token);
-        current_pos++;
+            generated_gpu.index_put_({step}, next_token_tensor.reshape({1}));
+            current_pos++;
+        }
+
+        result.decode_ms = step_timer.elapsed_ms();
     }
 
-    result.decode_ms = step_timer.elapsed_ms();
-
     // --- 8. Package results ---
-    result.num_tokens = static_cast<int>(generated.size());
-    result.generated_ids = torch::tensor(generated, torch::TensorOptions().dtype(torch::kLong));
+    auto generated_cpu = generated_gpu.to(torch::kCPU);
+    auto generated_acc = generated_cpu.accessor<int64_t, 1>();
+    result.num_tokens = max_new_tokens;
+    for (int i = 0; i < max_new_tokens; i++) {
+        if (generated_acc[i] == config_.eos_token_id) {
+            result.num_tokens = i + 1;
+            break;
+        }
+    }
+    result.generated_ids = generated_cpu.index({torch::indexing::Slice(0, result.num_tokens)});
     result.total_ms = total_timer.elapsed_ms();
 
     // Reset KV cache for next inference
     kv_cache_.reset();
 
     return result;
+}
+
+torch::Tensor WallXModel::dump_text_logits_teacher_forced(
+    const torch::Tensor& input_ids,
+    const torch::Tensor& pixel_values,
+    const torch::Tensor& image_grid_thw,
+    const torch::Tensor& teacher_token_ids) {
+
+    int batch_size = input_ids.size(0);
+    int seq_len = input_ids.size(1);
+    auto device = input_ids.device();
+    int num_steps = teacher_token_ids.numel();
+
+    TORCH_CHECK(batch_size == 1, "Teacher-forced logits dump currently expects batch_size=1");
+    TORCH_CHECK(teacher_token_ids.dim() == 1, "teacher_token_ids must be 1D");
+    bool recompute_full = std::getenv("WALLX_DEBUG_VQA_RECOMPUTE") != nullptr;
+
+    torch::Tensor image_embeds;
+    if (pixel_values.defined()) {
+        image_embeds = vision_.forward(pixel_values, image_grid_thw);
+    }
+
+    auto build_inputs_embeds = [&](const torch::Tensor& cur_input_ids) {
+        auto cur_inputs_embeds = torch::embedding(embed_tokens_, cur_input_ids);
+        if (image_embeds.defined()) {
+            auto image_mask = (cur_input_ids == config_.image_token_id);
+            auto mask_expanded = image_mask.unsqueeze(-1).expand_as(cur_inputs_embeds);
+            cur_inputs_embeds = cur_inputs_embeds.masked_scatter(
+                mask_expanded, image_embeds.to(cur_inputs_embeds.dtype()));
+        }
+        return cur_inputs_embeds;
+    };
+
+    auto inputs_embeds = build_inputs_embeds(input_ids);
+
+    auto [position_ids, rope_deltas] = get_rope_index(
+        input_ids, image_grid_thw,
+        /*video_grid_thw=*/torch::optional<torch::Tensor>(),
+        /*second_per_grid_ts=*/torch::optional<torch::Tensor>(),
+        /*attention_mask=*/torch::optional<torch::Tensor>(),
+        config_.vision_spatial_merge_size,
+        config_.image_token_id,
+        /*video_token_id=*/config_.image_token_id + 1,
+        config_.vision_start_token_id,
+        /*tokens_per_second=*/1.0f);
+
+    TokenTypeInfo token_types;
+    auto moe_types = torch::zeros({1, seq_len}, torch::TensorOptions().dtype(torch::kLong).device(device));
+    token_types.token_types = moe_types.reshape({-1});
+    token_types.num_tokens_per_expert[0] = seq_len;
+    for (int i = 1; i < config_.num_experts; i++) {
+        token_types.num_tokens_per_expert[i] = 0;
+    }
+    token_types.grouped_by_expert = true;
+
+    kv_cache_.allocate(config_.num_hidden_layers, batch_size, seq_len + num_steps,
+                        config_.num_key_value_heads, config_.head_dim, device);
+
+    std::vector<torch::Tensor> logits_cpu;
+    logits_cpu.reserve(num_steps);
+
+    auto hidden_states = transformer_forward(inputs_embeds, position_ids, token_types,
+                                             /*use_cache=*/true, /*is_causal=*/true);
+    auto last_hidden = hidden_states.index({0, -1});
+    auto logits = torch::matmul(last_hidden, lm_head_weight_.t());
+    logits_cpu.push_back(logits.to(torch::kFloat32).cpu());
+
+    if (num_steps <= 1) {
+        kv_cache_.reset();
+        return torch::stack(logits_cpu, 0);
+    }
+
+    int64_t current_pos = position_ids.max().item<int64_t>() + 1;
+    TokenTypeInfo decode_token_types;
+    auto single_type = torch::zeros({1}, torch::TensorOptions().dtype(torch::kLong).device(device));
+    decode_token_types.token_types = single_type;
+    decode_token_types.num_tokens_per_expert[0] = 1;
+    for (int i = 1; i < config_.num_experts; i++) {
+        decode_token_types.num_tokens_per_expert[i] = 0;
+    }
+    decode_token_types.grouped_by_expert = true;
+
+    auto teacher_gpu = teacher_token_ids.to(device, torch::kLong).contiguous();
+    auto token_id = torch::empty({1, 1}, torch::TensorOptions().dtype(torch::kLong).device(device));
+    auto decode_pos = torch::empty({3, 1, 1}, torch::TensorOptions().dtype(torch::kLong).device(device));
+
+    for (int step = 1; step < num_steps; step++) {
+        torch::Tensor step_logits;
+        if (recompute_full) {
+            kv_cache_.reset();
+            auto forced_prefix = teacher_gpu.index({torch::indexing::Slice(0, step)}).reshape({1, step});
+            auto cur_input_ids = torch::cat({input_ids, forced_prefix}, /*dim=*/1);
+            auto cur_inputs_embeds = build_inputs_embeds(cur_input_ids);
+            auto [cur_position_ids, cur_rope_deltas] = get_rope_index(
+                cur_input_ids, image_grid_thw,
+                /*video_grid_thw=*/torch::optional<torch::Tensor>(),
+                /*second_per_grid_ts=*/torch::optional<torch::Tensor>(),
+                /*attention_mask=*/torch::optional<torch::Tensor>(),
+                config_.vision_spatial_merge_size,
+                config_.image_token_id,
+                /*video_token_id=*/config_.image_token_id + 1,
+                config_.vision_start_token_id,
+                /*tokens_per_second=*/1.0f);
+            TokenTypeInfo cur_token_types;
+            auto cur_moe_types = torch::zeros({1, cur_input_ids.size(1)},
+                torch::TensorOptions().dtype(torch::kLong).device(device));
+            cur_token_types.token_types = cur_moe_types.reshape({-1});
+            cur_token_types.num_tokens_per_expert[0] = cur_input_ids.size(1);
+            for (int i = 1; i < config_.num_experts; i++) {
+                cur_token_types.num_tokens_per_expert[i] = 0;
+            }
+            cur_token_types.grouped_by_expert = true;
+            auto cur_hidden_states = transformer_forward(
+                cur_inputs_embeds, cur_position_ids, cur_token_types,
+                /*use_cache=*/false, /*is_causal=*/true);
+            step_logits = torch::matmul(cur_hidden_states.index({0, -1}), lm_head_weight_.t());
+        } else {
+            token_id.copy_(teacher_gpu.index({step - 1}).reshape({1, 1}));
+            auto token_embed = torch::embedding(embed_tokens_, token_id);
+            decode_pos.fill_(current_pos);
+            auto decode_hidden = transformer_forward(token_embed, decode_pos, decode_token_types,
+                                                     /*use_cache=*/true, /*is_causal=*/false);
+            step_logits = torch::matmul(decode_hidden.index({0, 0}), lm_head_weight_.t());
+            current_pos++;
+        }
+        logits_cpu.push_back(step_logits.to(torch::kFloat32).cpu());
+    }
+
+    kv_cache_.reset();
+    return torch::stack(logits_cpu, 0);
 }

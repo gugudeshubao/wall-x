@@ -192,5 +192,22 @@ python3 compare_vqa_backends.py \
   - input 组织消融
   - backend smoke
   - wrapper smoke
+  - `edge_router` 规则路由 smoke
 - Thor-U 上已同步同一套代码和 case manifest
 - Thor-U 还没有可直接复用的 Edge-LLM engine，因此还不能出同口径实跑数
+
+## 推荐默认策略
+
+如果目标是做 wall-x VQA 的**默认可选策略**，现在最合适的是：
+
+- `edge_router`
+  - `Describe ...` → `Qwen2.5-VL-3B`
+  - `What objects ...` → `Qwen3-VL-2B`
+- `wallx_vqa`
+  - 作为兼容 preset 保留
+- `cpp_infer`
+  - 继续做默认基线
+
+也就是说：
+
+> **VQA 不是直接切到某一个 Edge-LLM 模型，而是切到一个可路由的 Edge backend。**

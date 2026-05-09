@@ -4,9 +4,12 @@
 #include <string>
 #include <chrono>
 #include <fstream>
+#include <vector>
+#include <filesystem>
 
 #include "model.h"
 #include "utils.h"
+#include "weight_loader.h"
 
 // Simple CLI argument parser
 struct Args {
@@ -14,6 +17,9 @@ struct Args {
     std::string kernels_dir = "";
     std::string dataset_name = "x2_normal";
     std::string mode = "action";  // "action" or "vqa"
+    std::string input_dir = "";   // directory with pre-saved .pt tensors (for accuracy validation)
+    std::string teacher_tokens_path = "";
+    std::string dump_logits_path = "";
     int num_timesteps = 5;
     int max_new_tokens = 64;
     int warmup_runs = 2;
@@ -35,6 +41,12 @@ Args parse_args(int argc, char* argv[]) {
             args.num_timesteps = std::stoi(argv[++i]);
         } else if (arg == "--mode" && i + 1 < argc) {
             args.mode = argv[++i];
+        } else if ((arg == "--input" || arg == "-i") && i + 1 < argc) {
+            args.input_dir = argv[++i];
+        } else if (arg == "--teacher_tokens" && i + 1 < argc) {
+            args.teacher_tokens_path = argv[++i];
+        } else if (arg == "--dump_logits" && i + 1 < argc) {
+            args.dump_logits_path = argv[++i];
         } else if (arg == "--max_new_tokens" && i + 1 < argc) {
             args.max_new_tokens = std::stoi(argv[++i]);
         } else if (arg == "--warmup" && i + 1 < argc) {
@@ -48,6 +60,9 @@ Args parse_args(int argc, char* argv[]) {
                       << "  --model, -m PATH      Path to model checkpoint directory\n"
                       << "  --kernels, -k PATH    Path to Triton cubin kernels directory\n"
                       << "  --mode MODE           Inference mode: action or vqa (default: action)\n"
+                      << "  --input, -i PATH      Load pre-saved tensors from directory (for accuracy validation)\n"
+                      << "  --teacher_tokens PATH Teacher-forced token tensor (.pt) for VQA debug\n"
+                      << "  --dump_logits PATH    Save teacher-forced VQA logits tensor (.pt)\n"
                       << "  --dataset NAME        Dataset name for normalizer (default: x2_normal)\n"
                       << "  --timesteps N         Number of ODE timesteps (default: 5)\n"
                       << "  --max_new_tokens N    Max tokens to generate in VQA mode (default: 64)\n"
@@ -69,8 +84,70 @@ struct DummyInputs {
     torch::Tensor input_ids;
     torch::Tensor pixel_values;
     torch::Tensor image_grid_thw;
+    torch::Tensor image_embeds;
+    torch::Tensor vision_after_reorder;
+    torch::Tensor vision_block0;
+    torch::Tensor vision_block7;
+    torch::Tensor vision_block7_input;
+    torch::Tensor vision_block7_q;
+    torch::Tensor vision_block7_k;
+    torch::Tensor vision_block7_v;
+    torch::Tensor vision_block7_q_rot;
+    torch::Tensor vision_block7_k_rot;
+    torch::Tensor vision_block7_norm1;
+    torch::Tensor vision_block7_attn_out;
+    torch::Tensor vision_block7_after_attn;
+    torch::Tensor vision_block7_norm2;
+    torch::Tensor vision_block7_mlp_out;
+    torch::Tensor vision_block7_output;
+    torch::Tensor vision_pre_merger;
+    torch::Tensor vision_block15_input;
+    torch::Tensor vision_block15_q;
+    torch::Tensor vision_block15_k;
+    torch::Tensor vision_block15_v;
+    torch::Tensor vision_block15_q_rot;
+    torch::Tensor vision_block15_k_rot;
+    torch::Tensor vision_block15_norm1;
+    torch::Tensor vision_block15_attn_out;
+    torch::Tensor vision_block15_after_attn;
+    torch::Tensor vision_block15_norm2;
+    torch::Tensor vision_block15_mlp_out;
+    torch::Tensor vision_block15_output;
+    torch::Tensor vision_block23_input;
+    torch::Tensor vision_block23_q;
+    torch::Tensor vision_block23_k;
+    torch::Tensor vision_block23_v;
+    torch::Tensor vision_block23_q_rot;
+    torch::Tensor vision_block23_k_rot;
+    torch::Tensor vision_block23_norm1;
+    torch::Tensor vision_block23_attn_out;
+    torch::Tensor vision_block23_after_attn;
+    torch::Tensor vision_block23_norm2;
+    torch::Tensor vision_block23_mlp_out;
+    torch::Tensor vision_block23_output;
     torch::Tensor moe_token_types;
 };
+
+torch::Tensor load_token_ids_from_text(const std::string& path) {
+    std::ifstream ifs(path);
+    if (!ifs.is_open()) {
+        std::cerr << "ERROR: Failed to open teacher token file: " << path << std::endl;
+        exit(1);
+    }
+
+    std::vector<int64_t> token_ids;
+    int64_t token = 0;
+    while (ifs >> token) {
+        token_ids.push_back(token);
+    }
+
+    if (token_ids.empty()) {
+        std::cerr << "ERROR: No token IDs found in " << path << std::endl;
+        exit(1);
+    }
+
+    return torch::tensor(token_ids, torch::TensorOptions().dtype(torch::kLong));
+}
 
 DummyInputs create_dummy_inputs(const ModelConfig& config, torch::Device device) {
     DummyInputs inputs;
@@ -105,6 +182,126 @@ DummyInputs create_dummy_inputs(const ModelConfig& config, torch::Device device)
     // MoE token types: 0 for text/vision, 1 for action
     inputs.moe_token_types = torch::zeros({1, total_len}, opts_long);
     inputs.moe_token_types.index({0, torch::indexing::Slice(text_len + image_tokens, torch::indexing::None)}) = 1;
+
+    return inputs;
+}
+
+// Load pre-saved tensors from a directory (exported by export_vqa_inputs.py)
+DummyInputs load_inputs_from_dir(const std::string& input_dir, torch::Device device) {
+    DummyInputs inputs;
+    std::string sf_path = input_dir + "/inputs.safetensors";
+    std::cout << "[INPUT] Loading tensors from " << sf_path << std::endl;
+
+    auto weights = load_safetensors(sf_path, device);
+
+    auto find_tensor = [&](const std::string& name) -> torch::Tensor {
+        auto it = weights.find(name);
+        if (it == weights.end()) {
+            std::cerr << "ERROR: Tensor '" << name << "' not found in " << sf_path << std::endl;
+            exit(1);
+        }
+        return it->second;
+    };
+    auto find_optional_tensor = [&](const std::string& name) -> torch::Tensor {
+        auto it = weights.find(name);
+        return (it != weights.end()) ? it->second : torch::Tensor();
+    };
+
+    inputs.input_ids = find_tensor("input_ids");
+    inputs.pixel_values = find_optional_tensor("pixel_values");
+    inputs.image_grid_thw = find_optional_tensor("image_grid_thw");
+    inputs.image_embeds = find_optional_tensor("image_embeds");
+    inputs.vision_after_reorder = find_optional_tensor("vision_after_reorder");
+    inputs.vision_block0 = find_optional_tensor("vision_block0");
+    inputs.vision_block7 = find_optional_tensor("vision_block7");
+    inputs.vision_block7_input = find_optional_tensor("vision_block7_input");
+    inputs.vision_block7_q = find_optional_tensor("vision_block7_q");
+    inputs.vision_block7_k = find_optional_tensor("vision_block7_k");
+    inputs.vision_block7_v = find_optional_tensor("vision_block7_v");
+    inputs.vision_block7_q_rot = find_optional_tensor("vision_block7_q_rot");
+    inputs.vision_block7_k_rot = find_optional_tensor("vision_block7_k_rot");
+    inputs.vision_block7_norm1 = find_optional_tensor("vision_block7_norm1");
+    inputs.vision_block7_attn_out = find_optional_tensor("vision_block7_attn_out");
+    inputs.vision_block7_after_attn = find_optional_tensor("vision_block7_after_attn");
+    inputs.vision_block7_norm2 = find_optional_tensor("vision_block7_norm2");
+    inputs.vision_block7_mlp_out = find_optional_tensor("vision_block7_mlp_out");
+    inputs.vision_block7_output = find_optional_tensor("vision_block7_output");
+    inputs.vision_pre_merger = find_optional_tensor("vision_pre_merger");
+    inputs.vision_block15_input = find_optional_tensor("vision_block15_input");
+    inputs.vision_block15_q = find_optional_tensor("vision_block15_q");
+    inputs.vision_block15_k = find_optional_tensor("vision_block15_k");
+    inputs.vision_block15_v = find_optional_tensor("vision_block15_v");
+    inputs.vision_block15_q_rot = find_optional_tensor("vision_block15_q_rot");
+    inputs.vision_block15_k_rot = find_optional_tensor("vision_block15_k_rot");
+    inputs.vision_block15_norm1 = find_optional_tensor("vision_block15_norm1");
+    inputs.vision_block15_attn_out = find_optional_tensor("vision_block15_attn_out");
+    inputs.vision_block15_after_attn = find_optional_tensor("vision_block15_after_attn");
+    inputs.vision_block15_norm2 = find_optional_tensor("vision_block15_norm2");
+    inputs.vision_block15_mlp_out = find_optional_tensor("vision_block15_mlp_out");
+    inputs.vision_block15_output = find_optional_tensor("vision_block15_output");
+    inputs.vision_block23_input = find_optional_tensor("vision_block23_input");
+    inputs.vision_block23_q = find_optional_tensor("vision_block23_q");
+    inputs.vision_block23_k = find_optional_tensor("vision_block23_k");
+    inputs.vision_block23_v = find_optional_tensor("vision_block23_v");
+    inputs.vision_block23_q_rot = find_optional_tensor("vision_block23_q_rot");
+    inputs.vision_block23_k_rot = find_optional_tensor("vision_block23_k_rot");
+    inputs.vision_block23_norm1 = find_optional_tensor("vision_block23_norm1");
+    inputs.vision_block23_attn_out = find_optional_tensor("vision_block23_attn_out");
+    inputs.vision_block23_after_attn = find_optional_tensor("vision_block23_after_attn");
+    inputs.vision_block23_norm2 = find_optional_tensor("vision_block23_norm2");
+    inputs.vision_block23_mlp_out = find_optional_tensor("vision_block23_mlp_out");
+    inputs.vision_block23_output = find_optional_tensor("vision_block23_output");
+
+    // MoE token types: all 0 for VQA
+    inputs.moe_token_types = torch::zeros_like(inputs.input_ids);
+
+    std::cout << "[INPUT] input_ids:      " << inputs.input_ids.sizes() << std::endl;
+    if (inputs.pixel_values.defined()) {
+        std::cout << "[INPUT] pixel_values:   " << inputs.pixel_values.sizes() << std::endl;
+    } else {
+        std::cout << "[INPUT] pixel_values:   <none>" << std::endl;
+    }
+    if (inputs.image_grid_thw.defined()) {
+        std::cout << "[INPUT] image_grid_thw: " << inputs.image_grid_thw.sizes() << std::endl;
+    } else {
+        std::cout << "[INPUT] image_grid_thw: <none>" << std::endl;
+    }
+    if (inputs.image_embeds.defined()) {
+        std::cout << "[INPUT] image_embeds:   " << inputs.image_embeds.sizes() << std::endl;
+    }
+    if (inputs.vision_after_reorder.defined()) {
+        std::cout << "[INPUT] vision_after_reorder: " << inputs.vision_after_reorder.sizes() << std::endl;
+    }
+    if (inputs.vision_block0.defined()) {
+        std::cout << "[INPUT] vision_block0: " << inputs.vision_block0.sizes() << std::endl;
+    }
+    if (inputs.vision_block7.defined()) {
+        std::cout << "[INPUT] vision_block7: " << inputs.vision_block7.sizes() << std::endl;
+    }
+    if (inputs.vision_block7_q.defined()) {
+        std::cout << "[INPUT] vision_block7_q: " << inputs.vision_block7_q.sizes() << std::endl;
+    }
+    if (inputs.vision_block7_k.defined()) {
+        std::cout << "[INPUT] vision_block7_k: " << inputs.vision_block7_k.sizes() << std::endl;
+    }
+    if (inputs.vision_block7_v.defined()) {
+        std::cout << "[INPUT] vision_block7_v: " << inputs.vision_block7_v.sizes() << std::endl;
+    }
+    if (inputs.vision_block7_q_rot.defined()) {
+        std::cout << "[INPUT] vision_block7_q_rot: " << inputs.vision_block7_q_rot.sizes() << std::endl;
+    }
+    if (inputs.vision_block7_k_rot.defined()) {
+        std::cout << "[INPUT] vision_block7_k_rot: " << inputs.vision_block7_k_rot.sizes() << std::endl;
+    }
+    if (inputs.vision_pre_merger.defined()) {
+        std::cout << "[INPUT] vision_pre_merger: " << inputs.vision_pre_merger.sizes() << std::endl;
+    }
+    if (inputs.vision_block15_input.defined()) {
+        std::cout << "[INPUT] vision_block15_input: " << inputs.vision_block15_input.sizes() << std::endl;
+    }
+    if (inputs.vision_block23_input.defined()) {
+        std::cout << "[INPUT] vision_block23_input: " << inputs.vision_block23_input.sizes() << std::endl;
+    }
 
     return inputs;
 }
@@ -181,9 +378,259 @@ int main(int argc, char* argv[]) {
 
     if (args.mode == "vqa") {
         // ==================== VQA Mode ====================
-        auto inputs = create_vqa_dummy_inputs(config, device);
+        DummyInputs inputs;
+        if (!args.input_dir.empty()) {
+            inputs = load_inputs_from_dir(args.input_dir, device);
+        } else {
+            inputs = create_vqa_dummy_inputs(config, device);
+        }
         std::cout << "[INPUT] Sequence length: " << inputs.input_ids.size(1) << std::endl;
         std::cout << "[INPUT] Max new tokens: " << args.max_new_tokens << std::endl;
+
+        if (inputs.pixel_values.defined() &&
+            inputs.image_grid_thw.defined() &&
+            inputs.image_embeds.defined()) {
+            torch::NoGradGuard no_grad;
+            auto debug_tuple = model.encode_image_debug(inputs.pixel_values, inputs.image_grid_thw);
+            auto cpp_after_reorder = std::get<0>(debug_tuple);
+            auto cpp_block0 = std::get<1>(debug_tuple);
+            auto cpp_block7 = std::get<2>(debug_tuple);
+            auto cpp_pre_merger = std::get<3>(debug_tuple);
+            auto cpp_image_embeds = std::get<4>(debug_tuple);
+            auto cpp_f = cpp_image_embeds.flatten().to(torch::kFloat32);
+            auto ref_f = inputs.image_embeds.flatten().to(torch::kFloat32);
+            auto dot = (cpp_f * ref_f).sum().item<float>();
+            auto norm_cpp = cpp_f.norm().item<float>();
+            auto norm_ref = ref_f.norm().item<float>();
+            auto cosine = dot / (norm_cpp * norm_ref + 1e-10f);
+            auto diff = (cpp_f - ref_f).abs();
+            auto max_abs = diff.max().item<float>();
+            auto mean_abs = diff.mean().item<float>();
+            std::cout << "[VISION CMP] cpp vs python image_embeds:"
+                      << " cosine=" << cosine
+                      << " max_abs=" << max_abs
+                      << " mean_abs=" << mean_abs << std::endl;
+
+            if (inputs.vision_after_reorder.defined() && cpp_after_reorder.defined()) {
+                auto cpp_ar = cpp_after_reorder.flatten().to(torch::kFloat32);
+                auto ref_ar = inputs.vision_after_reorder.flatten().to(torch::kFloat32);
+                auto dot_ar = (cpp_ar * ref_ar).sum().item<float>();
+                auto norm_cpp_ar = cpp_ar.norm().item<float>();
+                auto norm_ref_ar = ref_ar.norm().item<float>();
+                auto cosine_ar = dot_ar / (norm_cpp_ar * norm_ref_ar + 1e-10f);
+                auto diff_ar = (cpp_ar - ref_ar).abs();
+                auto max_abs_ar = diff_ar.max().item<float>();
+                auto mean_abs_ar = diff_ar.mean().item<float>();
+                std::cout << "[VISION CMP] cpp vs python after_reorder:"
+                          << " cosine=" << cosine_ar
+                          << " max_abs=" << max_abs_ar
+                          << " mean_abs=" << mean_abs_ar << std::endl;
+            }
+
+            if (inputs.vision_block0.defined() && cpp_block0.defined()) {
+                auto cpp_b0 = cpp_block0.flatten().to(torch::kFloat32);
+                auto ref_b0 = inputs.vision_block0.flatten().to(torch::kFloat32);
+                auto dot_b0 = (cpp_b0 * ref_b0).sum().item<float>();
+                auto norm_cpp_b0 = cpp_b0.norm().item<float>();
+                auto norm_ref_b0 = ref_b0.norm().item<float>();
+                auto cosine_b0 = dot_b0 / (norm_cpp_b0 * norm_ref_b0 + 1e-10f);
+                auto diff_b0 = (cpp_b0 - ref_b0).abs();
+                auto max_abs_b0 = diff_b0.max().item<float>();
+                auto mean_abs_b0 = diff_b0.mean().item<float>();
+                std::cout << "[VISION CMP] cpp vs python block0:"
+                          << " cosine=" << cosine_b0
+                          << " max_abs=" << max_abs_b0
+                          << " mean_abs=" << mean_abs_b0 << std::endl;
+            }
+
+            if (inputs.vision_block7.defined() && cpp_block7.defined()) {
+                auto cpp_b7 = cpp_block7.flatten().to(torch::kFloat32);
+                auto ref_b7 = inputs.vision_block7.flatten().to(torch::kFloat32);
+                auto dot_b7 = (cpp_b7 * ref_b7).sum().item<float>();
+                auto norm_cpp_b7 = cpp_b7.norm().item<float>();
+                auto norm_ref_b7 = ref_b7.norm().item<float>();
+                auto cosine_b7 = dot_b7 / (norm_cpp_b7 * norm_ref_b7 + 1e-10f);
+                auto diff_b7 = (cpp_b7 - ref_b7).abs();
+                auto max_abs_b7 = diff_b7.max().item<float>();
+                auto mean_abs_b7 = diff_b7.mean().item<float>();
+                std::cout << "[VISION CMP] cpp vs python block7:"
+                          << " cosine=" << cosine_b7
+                          << " max_abs=" << max_abs_b7
+                          << " mean_abs=" << mean_abs_b7 << std::endl;
+            }
+
+            if (inputs.vision_block7_input.defined()) {
+                std::cout << "[VISION DBG] block7_input present, q=" << inputs.vision_block7_q.defined()
+                          << " k=" << inputs.vision_block7_k.defined()
+                          << " v=" << inputs.vision_block7_v.defined()
+                          << " q_rot=" << inputs.vision_block7_q_rot.defined()
+                          << " k_rot=" << inputs.vision_block7_k_rot.defined()
+                          << std::endl;
+                auto dbg = model.encode_image_block_debug(inputs.vision_block7_input, inputs.image_grid_thw, 7);
+                auto cmp = [&](const char* label, const torch::Tensor& cpp_t, const torch::Tensor& ref_t) {
+                    auto cpp_f = cpp_t.flatten().to(torch::kFloat32);
+                    auto ref_f = ref_t.flatten().to(torch::kFloat32);
+                    auto dot = (cpp_f * ref_f).sum().item<float>();
+                    auto norm_cpp = cpp_f.norm().item<float>();
+                    auto norm_ref = ref_f.norm().item<float>();
+                    auto cosine = dot / (norm_cpp * norm_ref + 1e-10f);
+                    auto diff = (cpp_f - ref_f).abs();
+                    std::cout << "[VISION CMP] cpp vs python " << label
+                              << ": cosine=" << cosine
+                              << " max_abs=" << diff.max().item<float>()
+                              << " mean_abs=" << diff.mean().item<float>()
+                              << std::endl;
+                };
+                if (inputs.vision_block7_q.defined()) cmp("block7_q", dbg.q, inputs.vision_block7_q);
+                if (inputs.vision_block7_k.defined()) cmp("block7_k", dbg.k, inputs.vision_block7_k);
+                if (inputs.vision_block7_v.defined()) cmp("block7_v", dbg.v, inputs.vision_block7_v);
+                if (inputs.vision_block7_q_rot.defined()) cmp("block7_q_rot", dbg.q_rot, inputs.vision_block7_q_rot);
+                if (inputs.vision_block7_k_rot.defined()) cmp("block7_k_rot", dbg.k_rot, inputs.vision_block7_k_rot);
+                if (inputs.vision_block7_norm1.defined()) cmp("block7_norm1", dbg.norm1_out, inputs.vision_block7_norm1);
+                if (inputs.vision_block7_attn_out.defined()) cmp("block7_attn_out", dbg.attn_out, inputs.vision_block7_attn_out);
+                if (inputs.vision_block7_after_attn.defined()) cmp("block7_after_attn", dbg.after_attn, inputs.vision_block7_after_attn);
+                if (inputs.vision_block7_norm2.defined()) cmp("block7_norm2", dbg.norm2_out, inputs.vision_block7_norm2);
+                if (inputs.vision_block7_mlp_out.defined()) cmp("block7_mlp_out", dbg.mlp_out, inputs.vision_block7_mlp_out);
+                if (inputs.vision_block7_output.defined()) cmp("block7_output_dbg", dbg.output, inputs.vision_block7_output);
+            }
+
+            if (inputs.vision_pre_merger.defined() && cpp_pre_merger.defined()) {
+                auto cpp_pm = cpp_pre_merger.flatten().to(torch::kFloat32);
+                auto ref_pm = inputs.vision_pre_merger.flatten().to(torch::kFloat32);
+                auto dot_pm = (cpp_pm * ref_pm).sum().item<float>();
+                auto norm_cpp_pm = cpp_pm.norm().item<float>();
+                auto norm_ref_pm = ref_pm.norm().item<float>();
+                auto cosine_pm = dot_pm / (norm_cpp_pm * norm_ref_pm + 1e-10f);
+                auto diff_pm = (cpp_pm - ref_pm).abs();
+                auto max_abs_pm = diff_pm.max().item<float>();
+                auto mean_abs_pm = diff_pm.mean().item<float>();
+                std::cout << "[VISION CMP] cpp vs python pre_merger:"
+                          << " cosine=" << cosine_pm
+                          << " max_abs=" << max_abs_pm
+                          << " mean_abs=" << mean_abs_pm << std::endl;
+            }
+
+            if (inputs.vision_block15_input.defined()) {
+                std::cout << "[VISION DBG] block15_input present, q=" << inputs.vision_block15_q.defined()
+                          << " k=" << inputs.vision_block15_k.defined()
+                          << " v=" << inputs.vision_block15_v.defined()
+                          << " q_rot=" << inputs.vision_block15_q_rot.defined()
+                          << " k_rot=" << inputs.vision_block15_k_rot.defined()
+                          << std::endl;
+                auto dbg15 = model.encode_image_block_debug(inputs.vision_block15_input, inputs.image_grid_thw, 15);
+                auto cmp15 = [&](const char* label, const torch::Tensor& cpp_t, const torch::Tensor& ref_t) {
+                    auto cpp_f = cpp_t.flatten().to(torch::kFloat32);
+                    auto ref_f = ref_t.flatten().to(torch::kFloat32);
+                    auto dot = (cpp_f * ref_f).sum().item<float>();
+                    auto norm_cpp = cpp_f.norm().item<float>();
+                    auto norm_ref = ref_f.norm().item<float>();
+                    auto cosine = dot / (norm_cpp * norm_ref + 1e-10f);
+                    auto diff = (cpp_f - ref_f).abs();
+                    std::cout << "[VISION CMP] cpp vs python " << label
+                              << ": cosine=" << cosine
+                              << " max_abs=" << diff.max().item<float>()
+                              << " mean_abs=" << diff.mean().item<float>()
+                              << std::endl;
+                };
+                if (inputs.vision_block15_q.defined()) cmp15("block15_q", dbg15.q, inputs.vision_block15_q);
+                if (inputs.vision_block15_k.defined()) cmp15("block15_k", dbg15.k, inputs.vision_block15_k);
+                if (inputs.vision_block15_v.defined()) cmp15("block15_v", dbg15.v, inputs.vision_block15_v);
+                if (inputs.vision_block15_q_rot.defined()) cmp15("block15_q_rot", dbg15.q_rot, inputs.vision_block15_q_rot);
+                if (inputs.vision_block15_k_rot.defined()) cmp15("block15_k_rot", dbg15.k_rot, inputs.vision_block15_k_rot);
+                if (inputs.vision_block15_norm1.defined()) cmp15("block15_norm1", dbg15.norm1_out, inputs.vision_block15_norm1);
+                if (inputs.vision_block15_attn_out.defined()) cmp15("block15_attn_out", dbg15.attn_out, inputs.vision_block15_attn_out);
+                if (inputs.vision_block15_after_attn.defined()) cmp15("block15_after_attn", dbg15.after_attn, inputs.vision_block15_after_attn);
+                if (inputs.vision_block15_norm2.defined()) cmp15("block15_norm2", dbg15.norm2_out, inputs.vision_block15_norm2);
+                if (inputs.vision_block15_mlp_out.defined()) cmp15("block15_mlp_out", dbg15.mlp_out, inputs.vision_block15_mlp_out);
+                if (inputs.vision_block15_output.defined()) cmp15("block15_output_dbg", dbg15.output, inputs.vision_block15_output);
+            }
+
+            if (inputs.vision_block23_input.defined()) {
+                std::cout << "[VISION DBG] block23_input present, q=" << inputs.vision_block23_q.defined()
+                          << " k=" << inputs.vision_block23_k.defined()
+                          << " v=" << inputs.vision_block23_v.defined()
+                          << " q_rot=" << inputs.vision_block23_q_rot.defined()
+                          << " k_rot=" << inputs.vision_block23_k_rot.defined()
+                          << std::endl;
+                auto dbg23 = model.encode_image_block_debug(inputs.vision_block23_input, inputs.image_grid_thw, 23);
+                auto cmp23 = [&](const char* label, const torch::Tensor& cpp_t, const torch::Tensor& ref_t) {
+                    auto cpp_f = cpp_t.flatten().to(torch::kFloat32);
+                    auto ref_f = ref_t.flatten().to(torch::kFloat32);
+                    auto dot = (cpp_f * ref_f).sum().item<float>();
+                    auto norm_cpp = cpp_f.norm().item<float>();
+                    auto norm_ref = ref_f.norm().item<float>();
+                    auto cosine = dot / (norm_cpp * norm_ref + 1e-10f);
+                    auto diff = (cpp_f - ref_f).abs();
+                    std::cout << "[VISION CMP] cpp vs python " << label
+                              << ": cosine=" << cosine
+                              << " max_abs=" << diff.max().item<float>()
+                              << " mean_abs=" << diff.mean().item<float>()
+                              << std::endl;
+                };
+                if (inputs.vision_block23_q.defined()) cmp23("block23_q", dbg23.q, inputs.vision_block23_q);
+                if (inputs.vision_block23_k.defined()) cmp23("block23_k", dbg23.k, inputs.vision_block23_k);
+                if (inputs.vision_block23_v.defined()) cmp23("block23_v", dbg23.v, inputs.vision_block23_v);
+                if (inputs.vision_block23_q_rot.defined()) cmp23("block23_q_rot", dbg23.q_rot, inputs.vision_block23_q_rot);
+                if (inputs.vision_block23_k_rot.defined()) cmp23("block23_k_rot", dbg23.k_rot, inputs.vision_block23_k_rot);
+                if (inputs.vision_block23_norm1.defined()) cmp23("block23_norm1", dbg23.norm1_out, inputs.vision_block23_norm1);
+                if (inputs.vision_block23_attn_out.defined()) cmp23("block23_attn_out", dbg23.attn_out, inputs.vision_block23_attn_out);
+                if (inputs.vision_block23_after_attn.defined()) cmp23("block23_after_attn", dbg23.after_attn, inputs.vision_block23_after_attn);
+                if (inputs.vision_block23_norm2.defined()) cmp23("block23_norm2", dbg23.norm2_out, inputs.vision_block23_norm2);
+                if (inputs.vision_block23_mlp_out.defined()) cmp23("block23_mlp_out", dbg23.mlp_out, inputs.vision_block23_mlp_out);
+                if (inputs.vision_block23_output.defined()) cmp23("block23_output_dbg", dbg23.output, inputs.vision_block23_output);
+            }
+        }
+
+        if (!args.dump_logits_path.empty()) {
+            if (args.teacher_tokens_path.empty()) {
+                std::cerr << "ERROR: --dump_logits requires --teacher_tokens" << std::endl;
+                return 1;
+            }
+
+            auto teacher_tokens = load_token_ids_from_text(args.teacher_tokens_path);
+
+            std::cout << "\n--- Teacher-Forced Logits Dump ---" << std::endl;
+            std::cout << "Teacher tokens: " << teacher_tokens.sizes() << std::endl;
+
+            torch::NoGradGuard no_grad;
+            auto logits = model.dump_text_logits_teacher_forced(
+                inputs.input_ids, inputs.pixel_values, inputs.image_grid_thw,
+                teacher_tokens);
+            if (std::filesystem::path(args.dump_logits_path).extension() == ".txt") {
+                std::ofstream ofs(args.dump_logits_path);
+                auto logits_acc = logits.accessor<float, 2>();
+                auto teacher_acc = teacher_tokens.accessor<int64_t, 1>();
+                for (int step = 0; step < logits.size(0); step++) {
+                    int64_t teacher_id = teacher_acc[step];
+                    int64_t top_id = 0;
+                    float top_logit = logits_acc[step][0];
+                    int64_t rank = 1;
+                    for (int64_t vid = 1; vid < logits.size(1); vid++) {
+                        float v = logits_acc[step][vid];
+                        if (v > top_logit) {
+                            top_logit = v;
+                            top_id = vid;
+                        }
+                        if (v > logits_acc[step][teacher_id]) {
+                            rank++;
+                        }
+                    }
+                    ofs << step
+                        << " teacher=" << teacher_id
+                        << " top=" << top_id
+                        << " teacher_rank=" << rank
+                        << " teacher_logit=" << logits_acc[step][teacher_id]
+                        << " top_logit=" << top_logit
+                        << "\n";
+                }
+                ofs.close();
+            } else {
+                torch::save(logits, args.dump_logits_path);
+            }
+            std::cout << "Saved logits debug output to " << args.dump_logits_path
+                      << " with shape " << logits.sizes() << std::endl;
+            return 0;
+        }
 
         // Warmup
         std::cout << "\n--- Warmup (" << args.warmup_runs << " runs) ---" << std::endl;
@@ -191,6 +638,7 @@ int main(int argc, char* argv[]) {
             torch::NoGradGuard no_grad;
             auto result = model.generate_text(
                 inputs.input_ids, inputs.pixel_values, inputs.image_grid_thw,
+                inputs.image_embeds,
                 args.max_new_tokens);
             std::cout << "  Run " << (i + 1) << ": " << result.total_ms << " ms, "
                       << result.num_tokens << " tokens" << std::endl;
@@ -205,6 +653,7 @@ int main(int argc, char* argv[]) {
                 torch::NoGradGuard no_grad;
                 auto result = model.generate_text(
                     inputs.input_ids, inputs.pixel_values, inputs.image_grid_thw,
+                    inputs.image_embeds,
                     args.max_new_tokens);
 
                 total_ms += result.total_ms;
@@ -236,10 +685,24 @@ int main(int argc, char* argv[]) {
             torch::NoGradGuard no_grad;
             auto result = model.generate_text(
                 inputs.input_ids, inputs.pixel_values, inputs.image_grid_thw,
+                inputs.image_embeds,
                 args.max_new_tokens);
 
             std::cout << "Generated " << result.num_tokens << " tokens" << std::endl;
             std::cout << "Token IDs: " << result.generated_ids << std::endl;
+
+            // Save generated token IDs for comparison with Python baseline
+            if (!args.input_dir.empty()) {
+                std::string out_path = args.input_dir + "/cpp_output_tokens.txt";
+                std::ofstream ofs(out_path);
+                auto ids = result.generated_ids.cpu().to(torch::kLong);
+                for (int i = 0; i < ids.size(0); i++) {
+                    if (i > 0) ofs << " ";
+                    ofs << ids[i].item<int64_t>();
+                }
+                ofs << std::endl;
+                std::cout << "Saved output tokens to " << out_path << std::endl;
+            }
 
             float tok_s = result.num_tokens / (result.total_ms / 1000.0f);
             std::cout << "\n--- Timing ---" << std::endl;

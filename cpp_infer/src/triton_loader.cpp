@@ -6,6 +6,43 @@
 
 namespace fs = std::filesystem;
 
+static std::string read_text_file(const std::string& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        return "";
+    }
+    return std::string((std::istreambuf_iterator<char>(file)),
+                       std::istreambuf_iterator<char>());
+}
+
+static std::string extract_json_string(const std::string& json, const std::string& key) {
+    auto pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return "";
+    pos = json.find(":", pos);
+    if (pos == std::string::npos) return "";
+    pos = json.find("\"", pos);
+    if (pos == std::string::npos) return "";
+    pos++;
+    auto end = json.find("\"", pos);
+    if (end == std::string::npos) return "";
+    return json.substr(pos, end - pos);
+}
+
+static int extract_json_int(const std::string& json, const std::string& key, int default_value = 0) {
+    auto pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return default_value;
+    pos = json.find(":", pos);
+    if (pos == std::string::npos) return default_value;
+    pos = json.find_first_of("-0123456789", pos);
+    if (pos == std::string::npos) return default_value;
+    auto end = json.find_first_not_of("0123456789", pos + 1);
+    try {
+        return std::stoi(json.substr(pos, end - pos));
+    } catch (...) {
+        return default_value;
+    }
+}
+
 // --- TritonKernel ---
 
 TritonKernel::~TritonKernel() {
@@ -82,12 +119,28 @@ void TritonKernelRegistry::load_directory(const std::string& dir_path) {
             // Try to find kernel function name from JSON metadata
             std::string meta_path = entry.path().parent_path().string() + "/" + name + ".json";
             std::string kernel_func_name = name;  // default: same as file name
+            unsigned int block_x = 256;
+            unsigned int shared_mem = 0;
 
             // For Triton-compiled kernels, the function name inside the cubin
-            // may differ. We use the file stem as default.
+            // often differs from the file stem. Prefer metadata when available.
+            if (fs::exists(meta_path)) {
+                auto meta_json = read_text_file(meta_path);
+                auto meta_kernel_name = extract_json_string(meta_json, "kernel_name");
+                if (!meta_kernel_name.empty()) {
+                    kernel_func_name = meta_kernel_name;
+                }
+                int num_warps = extract_json_int(meta_json, "num_warps", 0);
+                if (num_warps > 0) {
+                    block_x = static_cast<unsigned int>(num_warps * 32);
+                }
+                shared_mem = static_cast<unsigned int>(extract_json_int(meta_json, "shared_mem", 0));
+            }
+
             try {
                 TritonKernel kernel;
                 kernel.load(cubin_path, kernel_func_name);
+                kernel.set_launch_config(block_x, shared_mem);
                 kernels_[name] = std::move(kernel);
             } catch (const std::exception& e) {
                 std::cerr << "[TritonKernelRegistry] Failed to load " << name
@@ -117,14 +170,14 @@ void TritonKernelRegistry::fused_add_rmsnorm(void* x, void* residual, void* weig
     // Args must match kernel signature: x_ptr, residual_ptr, weight_ptr, out_ptr, M
     void* args[] = {&x, &residual, &weight, &out, &M};
     // Grid: one program per row, block: num_warps * 32
-    kernel.launch_1d(args, static_cast<unsigned int>(M), 8 * 32, 0, stream);
+    kernel.launch_1d(args, static_cast<unsigned int>(M), kernel.block_x(), kernel.shared_mem(), stream);
 }
 
 void TritonKernelRegistry::rmsnorm(void* x, void* weight, void* out,
                                     int M, CUstream stream) {
     auto& kernel = get("rmsnorm_h2048");
     void* args[] = {&x, &weight, &out, &M};
-    kernel.launch_1d(args, static_cast<unsigned int>(M), 8 * 32, 0, stream);
+    kernel.launch_1d(args, static_cast<unsigned int>(M), kernel.block_x(), kernel.shared_mem(), stream);
 }
 
 void TritonKernelRegistry::fused_silu_mul(void* gate, void* up, void* out,
@@ -141,6 +194,5 @@ void TritonKernelRegistry::fused_silu_mul(void* gate, void* up, void* out,
 
     auto& kernel = get(kernel_name);
     void* args[] = {&gate, &up, &out, &M, &N};
-    unsigned int block_x = (N == 11008) ? 8 * 32 : 4 * 32;
-    kernel.launch_1d(args, static_cast<unsigned int>(M), block_x, 0, stream);
+    kernel.launch_1d(args, static_cast<unsigned int>(M), kernel.block_x(), kernel.shared_mem(), stream);
 }

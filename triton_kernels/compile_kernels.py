@@ -11,10 +11,8 @@ Usage:
 import argparse
 import json
 import os
-import sys
 
 import torch
-import triton
 
 from fused_add_rmsnorm import (
     fused_add_rmsnorm_single_pass_kernel,
@@ -30,17 +28,10 @@ def get_device_capability():
     return "8.7"  # Default for Orin
 
 
-def compile_kernel(kernel_fn, name, signature, constants, num_warps, num_stages, output_dir):
+def compile_kernel(kernel_fn, name, example_args, warmup_kwargs, output_dir):
     """Compile a Triton kernel to cubin and save metadata."""
     print(f"Compiling {name}...")
-
-    compiled = triton.compile(
-        fn=kernel_fn,
-        signature=signature,
-        constants=constants,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
+    compiled = kernel_fn.warmup(*example_args, grid=(1,), **warmup_kwargs)
 
     # Save cubin
     cubin_path = os.path.join(output_dir, f"{name}.cubin")
@@ -50,11 +41,11 @@ def compile_kernel(kernel_fn, name, signature, constants, num_warps, num_stages,
     # Save metadata for C++ launcher
     meta = {
         "name": name,
-        "kernel_name": compiled.name if hasattr(compiled, "name") else name,
-        "num_warps": num_warps,
-        "num_stages": num_stages,
-        "shared_mem": compiled.shared if hasattr(compiled, "shared") else 0,
-        "constants": {k: v for k, v in constants.items() if isinstance(v, (int, float))},
+        "kernel_name": getattr(compiled.metadata, "name", getattr(compiled, "name", name)),
+        "num_warps": getattr(compiled.metadata, "num_warps", 0),
+        "num_stages": getattr(compiled.metadata, "num_stages", 0),
+        "shared_mem": getattr(compiled.metadata, "shared", 0),
+        "constants": {k: v for k, v in warmup_kwargs.items() if isinstance(v, (int, float))},
     }
     meta_path = os.path.join(output_dir, f"{name}.json")
     with open(meta_path, "w") as f:
@@ -87,25 +78,18 @@ def main():
 
     results = []
 
+    x = torch.empty((1, HIDDEN_SIZE), device="cuda", dtype=torch.bfloat16)
+    residual = torch.empty((1, HIDDEN_SIZE), device="cuda", dtype=torch.bfloat16)
+    weight = torch.empty((HIDDEN_SIZE,), device="cuda", dtype=torch.bfloat16)
+    out = torch.empty((1, HIDDEN_SIZE), device="cuda", dtype=torch.bfloat16)
+
     # 1. fused_add_rmsnorm (single pass, BLOCK_SIZE=2048 for hidden=2048)
     try:
         cubin, meta = compile_kernel(
             kernel_fn=fused_add_rmsnorm_single_pass_kernel,
             name="fused_add_rmsnorm_h2048",
-            signature={
-                0: "*bf16",  # X_ptr
-                1: "*bf16",  # Residual_ptr
-                2: "*bf16",  # Weight_ptr
-                3: "*bf16",  # Out_ptr
-                4: "i32",    # M
-            },
-            constants={
-                "N": HIDDEN_SIZE,
-                "eps": EPS,
-                "BLOCK_SIZE": 2048,
-            },
-            num_warps=8,
-            num_stages=2,
+            example_args=(x, residual, weight, out, 1, HIDDEN_SIZE, EPS, 2048),
+            warmup_kwargs={},
             output_dir=args.output_dir,
         )
         results.append(("fused_add_rmsnorm_h2048", cubin, meta))
@@ -117,65 +101,40 @@ def main():
         cubin, meta = compile_kernel(
             kernel_fn=rmsnorm_kernel,
             name="rmsnorm_h2048",
-            signature={
-                0: "*bf16",  # X_ptr
-                1: "*bf16",  # Weight_ptr
-                2: "*bf16",  # Out_ptr
-                3: "i32",    # M
-            },
-            constants={
-                "N": HIDDEN_SIZE,
-                "eps": EPS,
-                "BLOCK_SIZE": 2048,
-            },
-            num_warps=8,
-            num_stages=2,
+            example_args=(x, weight, out, 1, HIDDEN_SIZE, EPS, 2048),
+            warmup_kwargs={},
             output_dir=args.output_dir,
         )
         results.append(("rmsnorm_h2048", cubin, meta))
     except Exception as e:
         print(f"  FAILED: {e}")
 
+    gate0 = torch.empty((1, INTERMEDIATE_SIZE_0), device="cuda", dtype=torch.bfloat16)
+    up0 = torch.empty((1, INTERMEDIATE_SIZE_0), device="cuda", dtype=torch.bfloat16)
+    out0 = torch.empty((1, INTERMEDIATE_SIZE_0), device="cuda", dtype=torch.bfloat16)
     # 3. fused_silu_mul for expert 0 (intermediate=11008)
     try:
         cubin, meta = compile_kernel(
             kernel_fn=fused_silu_mul_kernel,
             name="fused_silu_mul_n11008",
-            signature={
-                0: "*bf16",  # Gate_ptr
-                1: "*bf16",  # Up_ptr
-                2: "*bf16",  # Out_ptr
-                3: "i32",    # M
-                4: "i32",    # N
-            },
-            constants={
-                "BLOCK_SIZE": 4096,
-            },
-            num_warps=8,
-            num_stages=2,
+            example_args=(gate0, up0, out0, 1, INTERMEDIATE_SIZE_0, 4096),
+            warmup_kwargs={},
             output_dir=args.output_dir,
         )
         results.append(("fused_silu_mul_n11008", cubin, meta))
     except Exception as e:
         print(f"  FAILED: {e}")
 
+    gate1 = torch.empty((1, INTERMEDIATE_SIZE_1), device="cuda", dtype=torch.bfloat16)
+    up1 = torch.empty((1, INTERMEDIATE_SIZE_1), device="cuda", dtype=torch.bfloat16)
+    out1 = torch.empty((1, INTERMEDIATE_SIZE_1), device="cuda", dtype=torch.bfloat16)
     # 4. fused_silu_mul for expert 1 (intermediate=2048)
     try:
         cubin, meta = compile_kernel(
             kernel_fn=fused_silu_mul_kernel,
             name="fused_silu_mul_n2048",
-            signature={
-                0: "*bf16",  # Gate_ptr
-                1: "*bf16",  # Up_ptr
-                2: "*bf16",  # Out_ptr
-                3: "i32",    # M
-                4: "i32",    # N
-            },
-            constants={
-                "BLOCK_SIZE": 2048,
-            },
-            num_warps=4,
-            num_stages=2,
+            example_args=(gate1, up1, out1, 1, INTERMEDIATE_SIZE_1, 2048),
+            warmup_kwargs={},
             output_dir=args.output_dir,
         )
         results.append(("fused_silu_mul_n2048", cubin, meta))

@@ -2,10 +2,21 @@
 
 void KVCache::allocate(int num_layers, int batch_size, int max_seq_len,
                        int num_kv_heads, int head_dim, torch::Device device) {
+    if ((int)k_cache_.size() == num_layers &&
+        batch_size_ == batch_size &&
+        max_seq_len_ == max_seq_len &&
+        num_kv_heads_ == num_kv_heads &&
+        head_dim_ == head_dim &&
+        device_ == device) {
+        current_len_ = 0;
+        return;
+    }
+
     batch_size_ = batch_size;
     max_seq_len_ = max_seq_len;
     num_kv_heads_ = num_kv_heads;
     head_dim_ = head_dim;
+    device_ = device;
     current_len_ = 0;
 
     auto options = torch::TensorOptions().dtype(torch::kBFloat16).device(device);

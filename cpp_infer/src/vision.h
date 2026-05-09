@@ -1,4 +1,5 @@
 #pragma once
+#include <vector>
 #include <torch/torch.h>
 #include "int8_linear.h"
 #include "utils.h"
@@ -16,6 +17,37 @@ extern std::tuple<torch::Tensor, torch::Tensor> get_window_index_cuda(
     int patch_size,
     int spatial_merge_unit);
 
+struct VisionAttentionLayout {
+    int num_seqs = 0;
+    bool single_sequence = false;
+    bool uniform_blocks = false;
+    int64_t block_len = 0;
+    std::vector<int64_t> offsets;
+};
+
+struct VisionAttentionDebug {
+    torch::Tensor q;
+    torch::Tensor k;
+    torch::Tensor v;
+    torch::Tensor q_rot;
+    torch::Tensor k_rot;
+    torch::Tensor output;
+};
+
+struct VisionBlockDebug {
+    torch::Tensor norm1_out;
+    torch::Tensor q;
+    torch::Tensor k;
+    torch::Tensor v;
+    torch::Tensor q_rot;
+    torch::Tensor k_rot;
+    torch::Tensor attn_out;
+    torch::Tensor after_attn;
+    torch::Tensor norm2_out;
+    torch::Tensor mlp_out;
+    torch::Tensor output;
+};
+
 // ViT MLP block (SiLU-gated: out = down_proj(silu(gate_proj(x)) * up_proj(x)))
 class VisionMLP {
 public:
@@ -32,10 +64,13 @@ public:
     void init(int dim, int num_heads);
     void load_weights(const WeightMap& weights, const std::string& prefix);
     torch::Tensor forward(const torch::Tensor& x,
-                          const torch::Tensor& cu_seqlens,
-                          int max_seqlen,
+                          const VisionAttentionLayout& layout,
                           const torch::Tensor& cos,
                           const torch::Tensor& sin);
+    VisionAttentionDebug forward_debug(const torch::Tensor& x,
+                                       const VisionAttentionLayout& layout,
+                                       const torch::Tensor& cos,
+                                       const torch::Tensor& sin);
 
 private:
     LinearOp qkv_;
@@ -50,10 +85,13 @@ public:
     void init(int dim, int num_heads);
     void load_weights(const WeightMap& weights, const std::string& prefix);
     torch::Tensor forward(const torch::Tensor& x,
-                          const torch::Tensor& cu_seqlens,
-                          int max_seqlen,
+                          const VisionAttentionLayout& layout,
                           const torch::Tensor& cos,
                           const torch::Tensor& sin);
+    VisionBlockDebug forward_debug(const torch::Tensor& x,
+                                   const VisionAttentionLayout& layout,
+                                   const torch::Tensor& cos,
+                                   const torch::Tensor& sin);
 
 private:
     torch::Tensor norm1_weight_;
@@ -92,6 +130,17 @@ public:
     // Returns: [total_merged_tokens, out_hidden_size]
     torch::Tensor forward(const torch::Tensor& pixel_values,
                           const torch::Tensor& grid_thw);
+
+    // Debug variant: returns {after_reorder_hidden, block0_hidden, block7_hidden, pre_merger_hidden, final_hidden}
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> forward_debug(
+        const torch::Tensor& pixel_values,
+        const torch::Tensor& grid_thw);
+
+    // Debug helper: run a single vision block on an already-reordered hidden state.
+    VisionBlockDebug run_block_debug(
+        const torch::Tensor& hidden_states_reordered,
+        const torch::Tensor& grid_thw,
+        int block_idx);
 
 private:
     // Patch embedding (Conv3D)

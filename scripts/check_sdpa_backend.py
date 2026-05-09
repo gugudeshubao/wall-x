@@ -12,6 +12,12 @@ q = torch.randn(1, 16, 420, 128, dtype=torch.bfloat16, device="cuda")
 k = torch.randn(1, 2, 420, 128, dtype=torch.bfloat16, device="cuda")
 v = torch.randn(1, 2, 420, 128, dtype=torch.bfloat16, device="cuda")
 
+# Some SDPA builds do not accept dense GQA inputs directly for backend forcing.
+# Expand KV heads explicitly so backend probing still works across versions.
+kv_groups = q.size(1) // k.size(1)
+k_sdpa = k.repeat_interleave(kv_groups, dim=1)
+v_sdpa = v.repeat_interleave(kv_groups, dim=1)
+
 # Test each backend individually
 print("=== Testing individual backends ===")
 backends_available = {}
@@ -19,7 +25,7 @@ backends_available = {}
 # 1. flash
 try:
     with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.FLASH_ATTENTION]):
-        out = F.scaled_dot_product_attention(q, k, v)
+        out = F.scaled_dot_product_attention(q, k_sdpa, v_sdpa)
     backends_available['flash'] = True
     print("flash_attention: AVAILABLE")
 except Exception as e:
@@ -29,7 +35,7 @@ except Exception as e:
 # 2. mem_efficient 
 try:
     with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION]):
-        out = F.scaled_dot_product_attention(q, k, v)
+        out = F.scaled_dot_product_attention(q, k_sdpa, v_sdpa)
     backends_available['mem_efficient'] = True
     print("efficient_attention: AVAILABLE")
 except Exception as e:
@@ -39,7 +45,7 @@ except Exception as e:
 # 3. cudnn
 try:
     with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.CUDNN_ATTENTION]):
-        out = F.scaled_dot_product_attention(q, k, v)
+        out = F.scaled_dot_product_attention(q, k_sdpa, v_sdpa)
     backends_available['cudnn'] = True
     print("cudnn_attention: AVAILABLE")
 except Exception as e:
@@ -49,7 +55,7 @@ except Exception as e:
 # 4. math
 try:
     with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.MATH]):
-        out = F.scaled_dot_product_attention(q, k, v)
+        out = F.scaled_dot_product_attention(q, k_sdpa, v_sdpa)
     backends_available['math'] = True
     print("math: AVAILABLE")
 except Exception as e:
@@ -71,11 +77,11 @@ for name, backend_enum in [
         with torch.nn.attention.sdpa_kernel([backend_enum]):
             # warmup
             for _ in range(10):
-                out = F.scaled_dot_product_attention(q, k, v)
+                out = F.scaled_dot_product_attention(q, k_sdpa, v_sdpa)
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             for _ in range(100):
-                out = F.scaled_dot_product_attention(q, k, v)
+                out = F.scaled_dot_product_attention(q, k_sdpa, v_sdpa)
             torch.cuda.synchronize()
             elapsed = (time.perf_counter() - t0) / 100 * 1000
         print(f"{name:20s}: {elapsed:.4f} ms")
@@ -85,11 +91,11 @@ for name, backend_enum in [
 # Default backend benchmark
 print("\ndefault (auto-select):")
 for _ in range(10):
-    out = F.scaled_dot_product_attention(q, k, v)
+    out = F.scaled_dot_product_attention(q, k_sdpa, v_sdpa)
 torch.cuda.synchronize()
 t0 = time.perf_counter()
 for _ in range(100):
-    out = F.scaled_dot_product_attention(q, k, v)
+    out = F.scaled_dot_product_attention(q, k_sdpa, v_sdpa)
 torch.cuda.synchronize()
 elapsed = (time.perf_counter() - t0) / 100 * 1000
 print(f"{'default':20s}: {elapsed:.4f} ms")

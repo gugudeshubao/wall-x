@@ -1,4 +1,13 @@
 cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
+
+# Use a separate wall-x CUDA arch knob because CMAKE_CUDA_ARCHITECTURES may be
+# left as OFF on some platforms even when nvcc is otherwise usable.
+set(WALLX_CUDA_ARCH "87" CACHE STRING "CUDA arch used by wall-x nvcc flags")
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES ${WALLX_CUDA_ARCH})
+endif()
+
 project(wallx_infer LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -43,20 +52,25 @@ endif()
 # --- Paths ---
 set(WALLX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(CSRC_DIR "${WALLX_ROOT}/csrc")
+set(KERNEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels")
 set(CUTLASS_INCLUDE "${WALLX_ROOT}/3rdparty/cutlass/include")
 set(KERNELS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/kernels")
 
-# --- CUDA architecture for Jetson Orin ---
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 87)
+# --- CUDA architecture ---
+if(DEFINED CMAKE_CUDA_ARCHITECTURES
+   AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL ""
+   AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "OFF")
+    list(GET CMAKE_CUDA_ARCHITECTURES 0 WALLX_CUDA_ARCH_FROM_CMAKE)
+    string(REGEX REPLACE "-real|-virtual" "" WALLX_CUDA_ARCH_FROM_CMAKE "${WALLX_CUDA_ARCH_FROM_CMAKE}")
+    set(WALLX_CUDA_ARCH ${WALLX_CUDA_ARCH_FROM_CMAKE})
 endif()
 
 # --- Compile flags ---
 set(CUDA_NVCC_FLAGS
     -std=c++17
     -DENABLE_BF16
-    -DGROUPED_GEMM_DEVICE_CAPABILITY=87
-    --generate-code=arch=compute_87,code=sm_87
+    -DGROUPED_GEMM_DEVICE_CAPABILITY=${WALLX_CUDA_ARCH}
+    --generate-code=arch=compute_${WALLX_CUDA_ARCH},code=sm_${WALLX_CUDA_ARCH}
     -O3
     --use_fast_math
 )
@@ -112,6 +126,7 @@ set(INFER_SOURCES
 add_executable(wallx_infer ${INFER_SOURCES})
 target_include_directories(wallx_infer PRIVATE
     src/
+    ${KERNEL_SRC_DIR}
     ${CSRC_DIR}
     ${CUTLASS_INCLUDE}
     ${TORCH_INCLUDE_DIRS}
@@ -136,9 +151,15 @@ target_compile_definitions(wallx_infer PRIVATE
 )
 
 # --- Fused INT8 CUDA kernels (for optimized W8A8 quantization) ---
-add_library(int8_fused_ops STATIC src/int8_kernels.cu src/cutlass_int8_gemm.cu)
+add_library(int8_fused_ops STATIC
+    src/kernels/activation_kernels.cu
+    src/kernels/int8_kernels.cu
+    src/kernels/cutlass_int8_gemm.cu
+    src/kernels/norm_kernels.cu
+)
 target_include_directories(int8_fused_ops PUBLIC
     src/
+    ${KERNEL_SRC_DIR}
     ${TORCH_INCLUDE_DIRS}
     ${CUTLASS_INCLUDE}
 )
@@ -160,6 +181,7 @@ set_target_properties(int8_fused_ops PROPERTIES
 add_executable(bench_int8 bench_int8.cpp)
 target_include_directories(bench_int8 PRIVATE
     src/
+    ${KERNEL_SRC_DIR}
     ${TORCH_INCLUDE_DIRS}
 )
 target_link_libraries(bench_int8 PRIVATE
@@ -175,4 +197,5 @@ message(STATUS "CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "Torch libraries: ${TORCH_LIBRARIES}")
 message(STATUS "CUTLASS include: ${CUTLASS_INCLUDE}")
 message(STATUS "CSRC directory: ${CSRC_DIR}")
+message(STATUS "Kernel source dir: ${KERNEL_SRC_DIR}")
 message(STATUS "Kernels directory: ${KERNELS_DIR}")

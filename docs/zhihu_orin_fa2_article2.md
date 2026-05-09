@@ -807,19 +807,17 @@ llama.cpp 的限制更根本：
 - **Triton 自定义算子探索**：消除框架开销后，回到算子层面，用 Triton 为 Orin 的 16 SM + 4MB L2 写专用 attention / decode kernel
 - 目标：从 6.4s 压到 ~2.1s（纯 GPU kernel 时间理论极限）
 
-**第四篇（预告）**：INT8/INT4 量化——在 C++ 里用 cublasLt 砍 GEMM
-- GEMM 是 batch=1 GEMV，带宽瓶颈不是算力瓶颈
-- torch._int_mm 不支持 M=1，bitsandbytes 不支持 SM 8.7
-- 正确路径：C++ 层面 cublasLt INT8 matmul（支持 M=1）
-- 量化对 MoE 路由和 Flow Action 精度的影响
-- 边缘端 VLA 模型的量化-精度 trade-off
+**第四篇（预告）**：在 Orin 上给 wall-x 这个机器人 VLA 做 INT8：为什么理论 2× 加速一开始几乎没用
+- 朴素 INT8 为什么一开始反而更慢：INT32 落地带宽 + kernel 路径选择的双重代价
+- `vision_mlp` 的 padding 补齐、`MoE expert INT8` 的双路径运行时
+- 从“量化几乎没用”到 Flow Action `~480ms`、VQA `~1.0s` 的覆盖率演化
+- 量化的真正价值不是单个 kernel 跑多快，而是覆盖率打到哪里
 
-**第五篇（预告）**：端侧 AI OS —— 从推理优化到系统架构
-- 前四篇的结论汇聚到一个方向：**具身智能的瓶颈不在 model，而在 runtime**
-- VLA 是有损压缩的物理模拟器，刷新率比单次精度更重要——这需要的不是一个更快的推理引擎，而是一个**端侧 AI 操作系统**
-- 从 model set runtime（多模型协同调度）到 AI OS（感知-决策-执行的实时流水线、硬件抽象、资源调度）
-- C++ 推理框架改造是 AI OS 的第一次原型验证
-- **附 1.0 版本 GitHub 地址**
+**第五篇（预告）**：量化之后还剩什么：在 Orin 上给 wall-x 做 CUDA Graph、算子融合和 CUTLASS
+- ODE / postfix fixed-shape 推理的 graph capture
+- `residual + rmsnorm`、`quantize + layout transform`、`GEMM + SiLU` 这类高频短链融合
+- 基于 CUTLASS 把 GEMM 前后的数据流继续往主算子里收
+- 从手工 fusion 走到 compiler pass，最后自然逼近 runtime / AI OS
 
 ---
 

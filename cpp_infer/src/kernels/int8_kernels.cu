@@ -1,4 +1,4 @@
-#include "int8_kernels.h"
+#include "kernels/int8_kernels.h"
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -35,17 +35,17 @@ __global__ void fused_quantize_kernel(
     const __nv_bfloat16* __restrict__ input,
     int8_t*              __restrict__ output,
     float*               __restrict__ scales,
-    int M, int K)
+    int M, int K_in, int K_out)
 {
     const int row = blockIdx.x;
     if (row >= M) return;
 
-    const __nv_bfloat16* in_row  = input  + (int64_t)row * K;
-    int8_t*              out_row = output + (int64_t)row * K;
+    const __nv_bfloat16* in_row  = input  + (int64_t)row * K_in;
+    int8_t*              out_row = output + (int64_t)row * K_out;
 
     // --- Phase 1: per-row absmax ---
     float tmax = 0.0f;
-    for (int j = threadIdx.x; j < K; j += blockDim.x)
+    for (int j = threadIdx.x; j < K_in; j += blockDim.x)
         tmax = fmaxf(tmax, fabsf(__bfloat162float(in_row[j])));
 
     // warp-level reduction
@@ -75,10 +75,14 @@ __global__ void fused_quantize_kernel(
 
     // --- Phase 2: quantize ---
     const float inv_s = 1.0f / scale_s;
-    for (int j = threadIdx.x; j < K; j += blockDim.x) {
-        float v = __bfloat162float(in_row[j]) * inv_s;
-        int   q = __float2int_rn(v);
-        out_row[j] = (int8_t)max(-128, min(127, q));
+    for (int j = threadIdx.x; j < K_out; j += blockDim.x) {
+        if (j < K_in) {
+            float v = __bfloat162float(in_row[j]) * inv_s;
+            int   q = __float2int_rn(v);
+            out_row[j] = (int8_t)max(-128, min(127, q));
+        } else {
+            out_row[j] = 0;
+        }
     }
 }
 
@@ -140,16 +144,28 @@ namespace int8_fused {
 std::tuple<torch::Tensor, torch::Tensor> quantize_activation(
     const torch::Tensor& input)
 {
+    return quantize_activation(input, input.size(-1));
+}
+
+
+std::tuple<torch::Tensor, torch::Tensor> quantize_activation(
+    const torch::Tensor& input,
+    int64_t padded_k)
+{
     TORCH_CHECK(input.is_cuda() && input.dtype() == torch::kBFloat16,
                 "quantize_activation: expect CUDA bf16 input");
+    TORCH_CHECK(padded_k >= input.size(-1),
+                "quantize_activation: padded_k must be >= input K");
     auto flat = input.reshape({-1, input.size(-1)});
-    const int M = flat.size(0), K = flat.size(1);
+    const int M = flat.size(0);
+    const int K_in = flat.size(1);
+    const int K_out = static_cast<int>(padded_k);
 
-    auto out   = torch::empty({M, K}, flat.options().dtype(torch::kInt8));
+    auto out   = torch::empty({M, K_out}, flat.options().dtype(torch::kInt8));
     auto scale = torch::empty({M},    flat.options().dtype(torch::kFloat32));
 
     // block size: up to 256, rounded to warp boundary
-    int threads = std::min(256, ((K + 31) / 32) * 32);
+    int threads = std::min(256, ((K_out + 31) / 32) * 32);
     threads = std::max(32, threads);
 
     fused_quantize_kernel<<<M, threads, 0,
@@ -157,7 +173,7 @@ std::tuple<torch::Tensor, torch::Tensor> quantize_activation(
         reinterpret_cast<const __nv_bfloat16*>(flat.data_ptr()),
         out.data_ptr<int8_t>(),
         scale.data_ptr<float>(),
-        M, K);
+        M, K_in, K_out);
 
     return {out, scale};
 }

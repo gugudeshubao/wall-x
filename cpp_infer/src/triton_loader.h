@@ -29,11 +29,19 @@ public:
 
     bool is_loaded() const { return function_ != nullptr; }
     const std::string& name() const { return name_; }
+    void set_launch_config(unsigned int block_x, unsigned int shared_mem) {
+        block_x_ = block_x;
+        shared_mem_ = shared_mem;
+    }
+    unsigned int block_x() const { return block_x_; }
+    unsigned int shared_mem() const { return shared_mem_; }
 
 private:
     CUmodule module_ = nullptr;
     CUfunction function_ = nullptr;
     std::string name_;
+    unsigned int block_x_ = 256;
+    unsigned int shared_mem_ = 0;
 };
 
 // Registry: manages all Triton kernels for the inference engine

@@ -7,6 +7,7 @@ Keeps Action Head, MoE experts, embeddings, and norms in bf16.
 
 Usage:
     python quantize_w8a8.py --model-dir /path/to/bf16/model --output-dir /path/to/int8/model
+    python quantize_w8a8.py --model-dir /path/to/bf16/model --output-dir /path/to/int8/model --quantize-moe-experts
 """
 
 import os
@@ -22,7 +23,11 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 
-def should_quantize(key: str) -> bool:
+def round_up_to_multiple(value: int, multiple: int) -> int:
+    return ((value + multiple - 1) // multiple) * multiple
+
+
+def should_quantize(key: str, quantize_moe_experts: bool = False) -> bool:
     """Determine if a weight key should be quantized to INT8.
 
     Quantize: Attention projections (q/k/v/o_proj), Vision linear layers, PatchMerger MLP.
@@ -41,9 +46,10 @@ def should_quantize(key: str) -> bool:
     # Normalization layers (RMSNorm, LayerNorm)
     if "layernorm" in key or "norm" in key:
         return False
-    # MoE expert weights (AsymmetricDualExpertGemm custom CUDA kernel)
     if "moe.experts" in key:
-        return False
+        return quantize_moe_experts and any(
+            p in key for p in ["gate_proj", "up_proj", "down_proj"]
+        )
     # Conv3D patch embedding
     if "patch_embed" in key:
         return False
@@ -98,10 +104,30 @@ def quantize_per_channel(weight: torch.Tensor):
     return w_int8, scale.to(torch.float32)
 
 
+def pad_weight_for_int8(weight: torch.Tensor):
+    """Pad a 2D weight tensor so both dims are multiples of 8."""
+    if weight.dim() != 2:
+        return weight, None
+
+    out_features, in_features = weight.shape
+    padded_out = round_up_to_multiple(out_features, 8)
+    padded_in = round_up_to_multiple(in_features, 8)
+
+    if padded_out == out_features and padded_in == in_features:
+        return weight, None
+
+    padded = torch.zeros((padded_out, padded_in), dtype=weight.dtype)
+    padded[:out_features, :in_features] = weight
+    orig_shape = torch.tensor([out_features, in_features], dtype=torch.int64)
+    return padded, orig_shape
+
+
 def main():
     parser = argparse.ArgumentParser(description="W8A8 INT8 Weight Quantization for wall-x")
     parser.add_argument("--model-dir", required=True, help="Path to bf16 safetensors model directory")
     parser.add_argument("--output-dir", required=True, help="Output directory for INT8 quantized model")
+    parser.add_argument("--quantize-moe-experts", action="store_true",
+                        help="Also quantize MoE expert projections (experimental)")
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir)
@@ -119,9 +145,11 @@ def main():
     print(f"Found {len(st_files)} safetensors file(s)")
 
     quantized_count = 0
+    padded_count = 0
     kept_count = 0
     total_bf16_bytes = 0
     total_int8_bytes = 0
+    padded_keys = set()
 
     for sf in st_files:
         print(f"\n{'='*60}")
@@ -133,32 +161,36 @@ def main():
             for key in f.keys():
                 tensor = f.get_tensor(key)
 
-                if should_quantize(key):
-                    # torch._int_mm requires both N (out_features, dim=0) and
-                    # K (in_features, dim=1) to be multiples of 8
-                    if tensor.dim() == 2 and (tensor.shape[0] % 8 != 0 or tensor.shape[1] % 8 != 0):
-                        output_tensors[key] = tensor
-                        kept_count += 1
-                        print(f"  [SKIP] {key}: shape {list(tensor.shape)} not aligned to 8")
-                        continue
-
-                    # Quantize this weight
-                    w_int8, scale = quantize_per_channel(tensor)
+                if should_quantize(key, quantize_moe_experts=args.quantize_moe_experts):
+                    quant_tensor, orig_shape = pad_weight_for_int8(tensor)
+                    w_int8, scale = quantize_per_channel(quant_tensor)
                     # Store int8 weight with SAME key (dtype identifies it)
                     output_tensors[key] = w_int8
                     # Store per-channel scale with _scale suffix
                     scale_key = key.replace(".weight", ".weight_scale")
                     output_tensors[scale_key] = scale
+                    if orig_shape is not None:
+                        shape_key = key.replace(".weight", ".weight_orig_shape")
+                        output_tensors[shape_key] = orig_shape
+                        padded_keys.add(key)
+                        padded_count += 1
 
                     quantized_count += 1
                     orig_bytes = tensor.numel() * tensor.element_size()
                     int8_bytes = w_int8.numel() * 1 + scale.numel() * 4
+                    if orig_shape is not None:
+                        int8_bytes += orig_shape.numel() * orig_shape.element_size()
                     total_bf16_bytes += orig_bytes
                     total_int8_bytes += int8_bytes
 
-                    print(f"  [Q] {key}: {list(tensor.shape)} "
-                          f"bf16({orig_bytes/1e6:.1f}MB) -> int8({int8_bytes/1e6:.1f}MB) "
-                          f"({int8_bytes/orig_bytes*100:.0f}%)")
+                    if orig_shape is not None:
+                        print(f"  [PAD-Q] {key}: {list(tensor.shape)} -> {list(quant_tensor.shape)} "
+                              f"bf16({orig_bytes/1e6:.1f}MB) -> int8({int8_bytes/1e6:.1f}MB) "
+                              f"({int8_bytes/orig_bytes*100:.0f}%)")
+                    else:
+                        print(f"  [Q] {key}: {list(tensor.shape)} "
+                              f"bf16({orig_bytes/1e6:.1f}MB) -> int8({int8_bytes/1e6:.1f}MB) "
+                              f"({int8_bytes/orig_bytes*100:.0f}%)")
                 else:
                     output_tensors[key] = tensor
                     kept_count += 1
@@ -176,9 +208,12 @@ def main():
                 new_map = OrderedDict()
                 for key, shard in index["weight_map"].items():
                     new_map[key] = shard
-                    if should_quantize(key):
+                    if should_quantize(key, quantize_moe_experts=args.quantize_moe_experts):
                         scale_key = key.replace(".weight", ".weight_scale")
                         new_map[scale_key] = shard
+                        if key in padded_keys:
+                            shape_key = key.replace(".weight", ".weight_orig_shape")
+                            new_map[shape_key] = shard
                 index["weight_map"] = new_map
             with open(output_dir / jf.name, 'w') as f:
                 json.dump(index, f, indent=2)
@@ -197,6 +232,7 @@ def main():
     print(f"Quantization Summary")
     print(f"{'='*60}")
     print(f"Quantized layers:  {quantized_count}")
+    print(f"Padded layers:     {padded_count}")
     print(f"Kept (bf16):       {kept_count}")
     if total_bf16_bytes > 0:
         print(f"Weight size:       {total_bf16_bytes/1e9:.2f}GB (bf16) -> {total_int8_bytes/1e9:.2f}GB (int8)")

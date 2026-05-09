@@ -1,6 +1,6 @@
-# INT8 量化实战：理论 2x 加速遇上 Amdahl 定律的铁壁
+# 在 Orin 上给 wall-x 做 INT8：从 W8A8 落地到量化框架雏形
 
-📌 本文为精华摘要版，完整版请搜索知乎同名文章《INT8 量化实战：从理论 2× 加速到 Amdahl 定律的铁壁》
+📌 本文为精华摘要版，完整版请搜索知乎同名文章《在 Orin 上给 wall-x 做 INT8：从 W8A8 落地到量化框架雏形》
 
 ---
 
@@ -69,5 +69,16 @@ Amdahl 定律：当你优化的部分只占 6.5% 时，即使优化到 0，总�
 - MoE INT8：占 GPU 28% → 预估 5-10ms
 
 CUDA Graph + ViT 量化组合拳大概率能过 2 Hz 门槛。
+
+## 评论区引流
+
+**评论 1：**
+这篇不是在证明“INT8 一定快”，而是在证明：**量化覆盖率不够时，收益会被吃掉。**
+
+**评论 2：**
+真实图片 case 我也补做过，`fruits_on_table` 单图的 C++ INT8 相对 bf16 有约 **1.29x** 的真实图端到端加速。
+
+**评论 3：**
+下一篇会继续写 CUDA Graph、fusion 和图级 QDQ。量化做到后面，已经是在补 runtime 了。
 
 #INT8量化 #CUTLASS #Amdahl定律 #JetsonOrin #GPU优化 #具身智能 #CUDA #机器人 #W8A8 #性能优化 #MMA指令 #Ampere #EVT #GEMM

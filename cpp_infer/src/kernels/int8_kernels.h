@@ -21,6 +21,16 @@ namespace int8_fused {
 std::tuple<torch::Tensor, torch::Tensor> quantize_activation(
     const torch::Tensor& input);   // [M, K] bf16
 
+/// Fused per-token activation quantize with optional zero-padding on the K dimension.
+/// Useful for INT8 weights padded to multiples of 8: avoids an extra zeros+copy step
+/// before quantization.
+///
+/// input: [M, K_in] bf16
+/// output int8: [M, K_out] where K_out >= K_in
+std::tuple<torch::Tensor, torch::Tensor> quantize_activation(
+    const torch::Tensor& input,
+    int64_t padded_k);   // K_out
+
 /// Fused dequantize: int32 [M,N] × act_scale [M] × weight_scale [N] + bias → bf16 [M,N]
 /// Single elementwise kernel with two scale lookups.
 torch::Tensor dequantize(

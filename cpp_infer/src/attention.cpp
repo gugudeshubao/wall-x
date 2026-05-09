@@ -60,9 +60,10 @@ torch::Tensor Attention::forward(const torch::Tensor& x,
     auto v = v_proj_.forward(x);
 
     // Reshape: [batch, seq, num_heads * head_dim] -> [batch, num_heads, seq, head_dim]
-    q = q.view({batch, seq_len, num_heads_, head_dim_}).transpose(1, 2);
-    k = k.view({batch, seq_len, num_kv_heads_, head_dim_}).transpose(1, 2);
-    v = v.view({batch, seq_len, num_kv_heads_, head_dim_}).transpose(1, 2);
+    // Must call .contiguous() because the CUDA RoPE kernel uses raw pointer indexing
+    q = q.view({batch, seq_len, num_heads_, head_dim_}).transpose(1, 2).contiguous();
+    k = k.view({batch, seq_len, num_kv_heads_, head_dim_}).transpose(1, 2).contiguous();
+    v = v.view({batch, seq_len, num_kv_heads_, head_dim_}).transpose(1, 2).contiguous();
 
     // Apply multimodal RoPE via CUDA kernel
     auto q_out = torch::empty_like(q);
@@ -88,10 +89,9 @@ torch::Tensor Attention::forward(const torch::Tensor& x,
     }
 
     // SDPA: scaled_dot_product_attention with is_causal=true, NO attention_mask
-    // This forces cuDNN backend (0.076ms, near TRT-LLM level)
     auto attn_output = torch::scaled_dot_product_attention(
         q, cached_k, cached_v,
-        /*attn_mask=*/{},           // No mask! This is the key insight from article 2
+        /*attn_mask=*/{},
         /*dropout_p=*/0.0,
         /*is_causal=*/is_causal
     );

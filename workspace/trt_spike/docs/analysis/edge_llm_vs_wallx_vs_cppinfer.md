@@ -879,6 +879,20 @@ one_single_engine.engine
 
 > **官方量化主路在 Orin 上是可用的，但它仍然更像官方 edge runtime 路线，而不是直接把 wall-x 的 VQA 压成最优时延。**
 
+同口径继续补了一条：
+
+- `Qwen2.5-VL-3B + int8_sq`
+  - 单次 VQA wall-clock: **`8234.588 ms`**
+
+所以这一轮同口径结果是：
+
+- `Qwen3-VL-2B + int8_sq`: `6245.258 ms`
+- `Qwen2.5-VL-3B + int8_sq`: `8234.588 ms`
+
+说明：
+
+> **官方量化主路在 Orin 上可用，但模型变大只会把时延继续拉高，而不会自然逼近 wall-x 当前 VQA baseline。**
+
 ### 7.6 最终建议
 
 - **VQA**：优先保留 `cpp_infer` 作为最稳基线，Edge-LLM 作为可选 backend / router 候选。
