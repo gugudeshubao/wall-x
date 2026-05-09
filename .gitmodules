@@ -1,3 +1,6 @@
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
+[submodule "workspace/edge_llm_exp/TensorRT-Edge-LLM"]
+	path = workspace/edge_llm_exp/TensorRT-Edge-LLM
+	url = git@github.com:gugudeshubao/TensorRT-Edge-LLM.git
