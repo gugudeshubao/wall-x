@@ -268,3 +268,13 @@ NOTES.md
 .env
 .env.local
 .env.*.local
+
+# Local-only ignore rules（本仓库特有）
+# 临时日志文件（thoru 构建/运行日志重定向产物）
+$LOG
+
+# 测试图片快照目录（已通过 *.jpg 等被忽略，但 test_images/ 自身也不入库）
+test_images/
+
+# 本机数据目录（包含临时数据集快照、checkpoint 缓存等）
+data/
